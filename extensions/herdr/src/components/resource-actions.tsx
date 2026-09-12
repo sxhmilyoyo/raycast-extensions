@@ -12,7 +12,7 @@ import { agentName } from "../lib/agent-appearance";
 import { focusResource, getAgentTarget, runHerdr, sendAgentKeys, sendPaneKeys } from "../lib/herdr";
 import { launchHerdrInTerminal, revealFocusedHerdr } from "../lib/terminal";
 import type { AgentInfo, PaneInfo, TabInfo, WorkspaceInfo } from "../lib/types";
-import { ManageSessionsAction, runAction, shortcuts } from "../lib/ui";
+import { ManageSessionsAction, ShowLocalPathInFinderAction, runAction, shortcuts } from "../lib/ui";
 import { PaneOutput } from "./pane-output";
 import { PromptAgentForm } from "./prompt-agent-form";
 import { CreateTabForm, RenameForm, RunCommandForm, SplitPaneForm } from "./resource-forms";
@@ -169,7 +169,7 @@ export function AgentActions({
         />
         <Action.CopyToClipboard title="Copy Pane ID" content={agent.pane_id} shortcut={shortcuts.copyId} />
         {agent.foreground_cwd || agent.cwd ? (
-          <Action.ShowInFinder path={agent.foreground_cwd || agent.cwd || ""} shortcut={shortcuts.copyPath} />
+          <ShowLocalPathInFinderAction path={agent.foreground_cwd || agent.cwd || ""} shortcut={shortcuts.copyPath} />
         ) : null}
       </ActionPanel.Section>
       <UtilityActions onRefresh={onDone} />
@@ -228,7 +228,7 @@ export function WorkspaceActions({
           shortcut={shortcuts.copyId}
         />
         {workspace.worktree?.checkout_path || workspacePath ? (
-          <Action.ShowInFinder
+          <ShowLocalPathInFinderAction
             path={workspace.worktree?.checkout_path || workspacePath || ""}
             shortcut={shortcuts.copyPath}
           />
@@ -343,7 +343,7 @@ export function PaneActions({
         />
         <Action.CopyToClipboard title="Copy Pane ID" content={pane.pane_id} shortcut={shortcuts.copyId} />
         {pane.foreground_cwd || pane.cwd ? (
-          <Action.ShowInFinder path={pane.foreground_cwd || pane.cwd || ""} shortcut={shortcuts.copyPath} />
+          <ShowLocalPathInFinderAction path={pane.foreground_cwd || pane.cwd || ""} shortcut={shortcuts.copyPath} />
         ) : null}
         <Action
           title="Close Pane"

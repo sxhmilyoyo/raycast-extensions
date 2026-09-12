@@ -5,8 +5,10 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { Application } from "@raycast/api";
 import { getHerdrPreferences } from "./preferences";
-import { resolveHerdrBinary, runHerdr, runHerdrJson } from "./herdr";
-import { resolveSession } from "./session-selection";
+import { HerdrError, resolveHerdrBinary, runHerdr, runHerdrJson } from "./herdr";
+import { requireMachine } from "./machines";
+import type { SessionRef } from "./session-ref";
+import { resolveSessionRef } from "./session-selection";
 import { lookupHerdrClientTtys, lookupHerdrClients } from "./process-lookup";
 import { shellQuote } from "./parsers";
 import { detectTerminalKind, expandCustomLauncher } from "./terminal-config";
@@ -101,14 +103,18 @@ export async function bringTerminalToFront(): Promise<void> {
   }
 }
 
-export async function focusExistingHerdrClient(explicitSession?: string): Promise<ClientFocusResult> {
+export async function focusExistingHerdrClient(explicit?: SessionRef): Promise<ClientFocusResult> {
   const application = selectedApplication();
   const kind = detectTerminalKind(application || { bundleId: "com.apple.Terminal", name: "Terminal", path: "" });
-  const session = await resolveSession(explicitSession);
+  const ref = await resolveSessionRef(explicit);
+  // A Remote Client is not recognized yet, and every route below matches the
+  // Session's bare name against the local process table, which would reveal a
+  // Local Host Session of that name.
+  if (ref.machine) return "unavailable";
 
   if (kind === "terminal" || kind === "iterm") {
     const binary = await resolveHerdrBinary();
-    const ttys = await lookupHerdrClientTtys(binary, session, PROCESS_LOOKUP_TIMEOUT_MS);
+    const ttys = await lookupHerdrClientTtys(binary, ref.name, PROCESS_LOOKUP_TIMEOUT_MS);
     if (ttys === undefined) return "unavailable";
     if (ttys.length === 0) return "missing";
     const script = kind === "terminal" ? buildTerminalFocusScript(ttys) : buildITermFocusScript(ttys);
@@ -126,7 +132,7 @@ export async function focusExistingHerdrClient(explicitSession?: string): Promis
       mustClearTitle = true;
       const title = await runHerdrJson<{ changed: boolean; reason: string }>(["terminal", "title", "set", marker], {
         timeout: FAST_FOCUS_TIMEOUT_MS,
-        session,
+        ref,
       });
       if (!title.changed) {
         mustClearTitle = false;
@@ -142,10 +148,10 @@ export async function focusExistingHerdrClient(explicitSession?: string): Promis
     } finally {
       if (mustClearTitle) {
         try {
-          await runHerdr(["terminal", "title", "clear"], { timeout: FAST_FOCUS_TIMEOUT_MS, session });
+          await runHerdr(["terminal", "title", "clear"], { timeout: FAST_FOCUS_TIMEOUT_MS, ref });
         } catch {
           // Retry generously so the marker title does not stick.
-          await runHerdr(["terminal", "title", "clear"], { timeout: 5_000, session }).catch(() => undefined);
+          await runHerdr(["terminal", "title", "clear"], { timeout: 5_000, ref }).catch(() => undefined);
         }
       }
     }
@@ -159,7 +165,7 @@ export async function focusExistingHerdrClient(explicitSession?: string): Promis
       resolveHerdrBinary(),
     ]);
     if (!listing) return "unavailable";
-    const ttys = await lookupHerdrClientTtys(binary, session, PROCESS_LOOKUP_TIMEOUT_MS);
+    const ttys = await lookupHerdrClientTtys(binary, ref.name, PROCESS_LOOKUP_TIMEOUT_MS);
     if (ttys === undefined) return "unavailable";
     const paneId = selectWezTermPane(listing, ttys);
     if (!paneId) return "missing";
@@ -185,12 +191,15 @@ export type ClientLocation =
   | { status: "unavailable"; reason: string };
 
 /**
- * The Clients of `session` whose tty is a Terminal Pane of the configured
- * Terminal Application, with the WezTerm window of the first. Only these may
- * be detached: servers, CLI calls, and the remote bridge run on Herdr's own
- * ptys and never appear in a terminal's pane listing.
+ * The Clients of `ref` whose tty is a Terminal Pane of the configured Terminal
+ * Application, with the WezTerm window of the first. Only these may be
+ * detached: servers, CLI calls, and the remote bridge run on Herdr's own ptys
+ * and never appear in a terminal's pane listing.
  */
-export async function locateTerminalPaneClients(session: string): Promise<ClientLocation> {
+export async function locateTerminalPaneClients(ref: SessionRef): Promise<ClientLocation> {
+  // A Remote Client is not recognized yet, and the Session's bare name would
+  // match a Local Host Session of that name in the process table.
+  if (ref.machine) return { status: "unavailable", reason: "a Machine's clients cannot be located yet" };
   const application = selectedApplication();
   const kind = detectTerminalKind(application || { bundleId: "com.apple.Terminal", name: "Terminal", path: "" });
   const terminalName = application?.name || "the terminal";
@@ -199,7 +208,7 @@ export async function locateTerminalPaneClients(session: string): Promise<Client
   }
 
   const binary = await resolveHerdrBinary();
-  const clients = await lookupHerdrClients(binary, session, PROCESS_LOOKUP_TIMEOUT_MS);
+  const clients = await lookupHerdrClients(binary, ref.name, PROCESS_LOOKUP_TIMEOUT_MS);
   if (clients === undefined) return { status: "unavailable", reason: "the process list could not be read" };
   if (clients.length === 0) return { status: "none" };
   const ttys = clients.map((client) => client.tty);
@@ -268,13 +277,44 @@ export function hasCustomTerminalLauncher(): boolean {
   return Boolean(getHerdrPreferences().customTerminalLauncher?.trim());
 }
 
+/**
+ * The global options that attach a launched Client to `ref`. A Local Host
+ * Session is named outright. A Machine's Session is Remote Attach, `--remote
+ * <target> --session <session>` from the Machine Herdr has saved: the Client
+ * runs here and streams the remote server's UI. Naming the Session alone would
+ * start a Local Host Session of that name.
+ */
+async function attachFlags(ref: SessionRef): Promise<string[]> {
+  if (!ref.machine) return ["--session", ref.name];
+  const machine = await requireMachine(ref.machine);
+  return ["--remote", machine.target, "--session", machine.session];
+}
+
+/**
+ * The argv of a launched Client of `ref`, running `command` inside it when one
+ * is given. Remote Attach runs the plain client only: Herdr rejects a
+ * subcommand after --remote before anything runs, yet the Terminal Pane would
+ * open on the error while the launch read as a success.
+ */
+async function clientArgs(ref: SessionRef, command: string[]): Promise<string[]> {
+  if (ref.machine && command.length > 0) {
+    throw new HerdrError(
+      `“${command.slice(0, 2).join(" ")}” is not available for a Machine`,
+      "machine_command_unavailable",
+      "Remote Attach opens Herdr's plain client. Attach to the Machine and continue there.",
+      ref,
+    );
+  }
+  return [...(await attachFlags(ref)), ...command];
+}
+
 export async function launchHerdrInTerminal(args: string[] = [], options: LaunchOptions = {}): Promise<LaunchResult> {
   const binary = await resolveHerdrBinary();
   const application = selectedApplication();
   // Launched clients inherit the Raycast process environment, where a leaked
   // HERDR_SESSION would retarget them, so the resolved session is always
-  // named. Callers that pass their own `session attach` argv opt out.
-  const sessionArgs = options.includeSession === false ? args : ["--session", await resolveSession(), ...args];
+  // named. Callers that pass their own attach argv opt out.
+  const sessionArgs = options.includeSession === false ? args : await clientArgs(await resolveSessionRef(), args);
   const command = [binary, ...sessionArgs].map(shellQuote).join(" ");
   const customLauncher = getHerdrPreferences().customTerminalLauncher?.trim();
   if (customLauncher) {
@@ -367,4 +407,14 @@ end tell`;
   }
   await exec("/usr/bin/open", ["-na", appTarget, "--args", "-e", binary, ...sessionArgs]);
   return {};
+}
+
+/**
+ * Attach `ref` in a Terminal Pane, starting its server first if it is Stopped.
+ * The one launch that names a Session other than the resolved one; a Machine's
+ * is Remote Attach.
+ */
+export async function attachInTerminal(ref: SessionRef, options: LaunchOptions = {}): Promise<LaunchResult> {
+  const argv = ref.machine ? await attachFlags(ref) : ["session", "attach", ref.name];
+  return launchHerdrInTerminal(argv, { ...options, includeSession: false });
 }

@@ -10,15 +10,10 @@ import {
 import { useCachedPromise } from "@raycast/utils";
 import { useHerdrSnapshot } from "./hooks/use-herdr-snapshot";
 import { agentIcon, agentName } from "./lib/agent-appearance";
-import {
-  focusResource,
-  formatHerdrError,
-  getAgentTarget,
-  getSessions,
-  sessionPresence,
-  stoppedSessionOf,
-} from "./lib/herdr";
+import { focusResource, formatHerdrError, getAgentTarget, getSessions, stoppedSessionOf } from "./lib/herdr";
+import { listMachines, sessionRefPresence } from "./lib/machines";
 import { getHerdrPreferences } from "./lib/preferences";
+import { formatSessionRef } from "./lib/session-ref";
 import { launchHerdrInTerminal, revealFocusedHerdr } from "./lib/terminal";
 import type { AgentInfo, AgentStatus, HerdrSnapshot } from "./lib/types";
 import { statusIcon, statusTitle } from "./lib/ui";
@@ -101,10 +96,19 @@ export default function Command() {
   const leadingCount = leadingStatus ? groups.get(leadingStatus)?.length : undefined;
   const stoppedSession = stoppedSessionOf(snapshot.error);
   // Herdr reports a missing session as not running too, and starting it would
-  // create it, so the session list is consulted only while one reads as stopped,
-  // and Start is offered only once the list has confirmed the name.
-  const sessions = useCachedPromise(getSessions, [], { execute: Boolean(stoppedSession), keepPreviousData: true });
-  const presence = stoppedSession === undefined ? "unknown" : sessionPresence(sessions, stoppedSession);
+  // create it, so a list is consulted only while one reads as stopped, and Start
+  // is offered only once that list has confirmed the Session: `session list`
+  // for the Local Host, the machine list for a Machine's Session.
+  const sessions = useCachedPromise(getSessions, [], {
+    execute: stoppedSession !== undefined && !stoppedSession.machine,
+    keepPreviousData: true,
+  });
+  const machines = useCachedPromise(listMachines, [], {
+    execute: Boolean(stoppedSession?.machine),
+    keepPreviousData: true,
+  });
+  const presence = stoppedSession === undefined ? "unknown" : sessionRefPresence(stoppedSession, sessions, machines);
+  const stoppedTitle = stoppedSession ? formatSessionRef(stoppedSession, machines.data) : undefined;
 
   if (!visible) return null;
 
@@ -114,13 +118,13 @@ export default function Command() {
       icon={leadingStatus ? statusIcon(leadingStatus) : Icon.Terminal}
       title={leadingCount ? String(leadingCount) : undefined}
       tooltip={
-        stoppedSession
-          ? `Herdr · ${stoppedSession} is stopped`
+        stoppedTitle
+          ? `Herdr · ${stoppedTitle} is stopped`
           : snapshot.error
             ? "Herdr is unavailable"
             : [
                 "Herdr",
-                snapshot.session,
+                snapshot.ref ? formatSessionRef(snapshot.ref) : undefined,
                 `${blocked.length} need attention`,
                 `${done.length} done`,
                 `${working.length} working`,
@@ -135,11 +139,11 @@ export default function Command() {
         <MenuBarExtra.Item
           title={
             presence === "listed"
-              ? `Session “${stoppedSession}” Is Stopped — Start and Attach`
+              ? `Session “${stoppedTitle}” Is Stopped — Start and Attach`
               : presence === "missing"
-                ? `Session “${stoppedSession}” Not Found — Manage Sessions…`
+                ? `Session “${stoppedTitle}” Not Found — Manage Sessions…`
                 : stoppedSession
-                  ? `Session “${stoppedSession}” Is Stopped — Manage Sessions…`
+                  ? `Session “${stoppedTitle}” Is Stopped — Manage Sessions…`
                   : "Herdr Unavailable — Open Herdr"
           }
           icon={stoppedSession ? Icon.Circle : Icon.ExclamationMark}

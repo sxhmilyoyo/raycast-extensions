@@ -1,5 +1,6 @@
 import { LocalStorage } from "@raycast/api";
 import { agentName } from "./agent-appearance";
+import { resolveSessionRef } from "./session-selection";
 import type { AgentInfo, PromptHistoryItem } from "./types";
 
 // Entries under the v1 key may hold a raw display_agent glyph as the stored
@@ -19,16 +20,23 @@ export async function getPromptHistory(): Promise<PromptHistoryItem[]> {
 }
 
 export async function addPromptHistory(agent: AgentInfo, target: string, text: string): Promise<void> {
+  const { machine } = await resolveSessionRef();
   const history = await getPromptHistory();
   const item: PromptHistoryItem = {
     id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     text,
     target,
+    machine,
     agent: agentName(agent),
     kind: agent.agent,
     createdAt: new Date().toISOString(),
   };
-  const deduplicated = history.filter((entry) => entry.text !== text || entry.target !== target);
+  // The Machine is part of the identity: a Pane id is Session-scoped and
+  // collides across Hosts, so text and target alone would drop a prompt that
+  // went to another Host.
+  const deduplicated = history.filter(
+    (entry) => entry.text !== text || entry.target !== target || entry.machine !== machine,
+  );
   await LocalStorage.setItem(STORAGE_KEY, JSON.stringify([item, ...deduplicated].slice(0, MAX_HISTORY)));
 }
 

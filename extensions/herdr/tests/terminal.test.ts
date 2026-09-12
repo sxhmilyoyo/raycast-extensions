@@ -2,7 +2,14 @@ import { execFile, spawn } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { launchHerdrInTerminal } from "../src/lib/terminal";
+import { setSelectedSession } from "../src/lib/session-selection";
+import {
+  attachInTerminal,
+  focusExistingHerdrClient,
+  launchHerdrInTerminal,
+  locateTerminalPaneClients,
+} from "../src/lib/terminal";
+import { cddMeshclaw, remote } from "./helpers/machines";
 import { storage } from "./helpers/raycast-api";
 
 vi.mock("node:child_process", () => ({ execFile: vi.fn(), spawn: vi.fn() }));
@@ -95,6 +102,72 @@ describe("launchHerdrInTerminal", () => {
 
     await launchHerdrInTerminal();
     expect(spawnedArgs()).toEqual(["-e", binary, "--session", "tmp-b"]);
+  });
+});
+
+// Remote Attach: a Machine's Session is attached with `--remote <target>
+// --session <session>`, taken from the Machine Herdr has saved. The Client runs
+// on the Local Host and streams the remote server's UI. Naming the Session with
+// --session alone would start a Local Host Session of that name.
+describe("Remote Attach for a Machine", () => {
+  const remoteAttach = ["-e", binary, "--remote", "clouddesk-arm", "--session", "meshclaw"];
+
+  it("launches the Selected Machine's Session by Remote Attach", async () => {
+    await setSelectedSession(remote);
+    mockExecFile(() => JSON.stringify([cddMeshclaw]));
+
+    await launchHerdrInTerminal();
+    expect(spawnedArgs()).toEqual(remoteAttach);
+  });
+
+  it("attaches a Machine by Remote Attach whatever the selection", async () => {
+    await setSelectedSession({ name: "tmp-b" });
+    mockExecFile(() => JSON.stringify([cddMeshclaw]));
+
+    await attachInTerminal(remote);
+    expect(spawnedArgs()).toEqual(remoteAttach);
+  });
+
+  // Herdr's --remote runs the plain client only: `herdr --remote … agent attach`
+  // is rejected before anything runs, yet the Terminal Pane would open on the
+  // error while Raycast reported the terminal opened.
+  it("refuses to run a subcommand inside a Remote Attach", async () => {
+    await setSelectedSession(remote);
+    mockExecFile(() => JSON.stringify([cddMeshclaw]));
+
+    await expect(launchHerdrInTerminal(["agent", "attach", "w1:p1"])).rejects.toMatchObject({
+      code: "machine_command_unavailable",
+    });
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  // A Machine that is no longer saved has no target to attach through.
+  it("refuses a Machine that is not in Herdr's list", async () => {
+    mockExecFile(() => "[]");
+
+    await expect(attachInTerminal(remote)).rejects.toMatchObject({ code: "machine_unknown" });
+    expect(spawn).not.toHaveBeenCalled();
+  });
+});
+
+// A Remote Client is not recognised yet, and both lookups match the Session's
+// bare name against the local process table, which would find a Local Host
+// Session of that name instead.
+describe("client lookups for a Machine", () => {
+  it("reports a Machine's Client as unavailable to Reveal without reading the process table", async () => {
+    mockExecFile(() => "");
+
+    await expect(focusExistingHerdrClient(remote)).resolves.toBe("unavailable");
+    expect(execCalls.some((call) => call.path.endsWith("pgrep"))).toBe(false);
+  });
+
+  it("cannot locate a Machine's Clients in Terminal Panes, and says so", async () => {
+    mockExecFile(() => "");
+
+    const location = await locateTerminalPaneClients(remote);
+    expect(location).toMatchObject({ status: "unavailable" });
+    expect(location.status === "unavailable" && location.reason).toMatch(/Machine/);
+    expect(execCalls.some((call) => call.path.endsWith("pgrep"))).toBe(false);
   });
 });
 

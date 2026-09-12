@@ -5,6 +5,11 @@ import { vi } from "vitest";
 //   vi.mock("@raycast/api", () => import("./helpers/raycast-api"));
 export const storage = new Map<string, string | number | boolean>();
 
+export const showInFinder = vi.fn();
+
+// Only ever dereferenced at render, which no test does.
+export const Icon = {} as Record<string, string>;
+
 export const LocalStorage = {
   getItem: vi.fn(async (key: string) => storage.get(key)),
   setItem: vi.fn(async (key: string, value: string | number | boolean) => {

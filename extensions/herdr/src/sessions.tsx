@@ -3,15 +3,16 @@ import { useCachedPromise } from "@raycast/utils";
 import { useSelectedSession } from "./hooks/use-herdr-snapshot";
 import { getSessions, runHerdr } from "./lib/herdr";
 import { getSessionEnterAction } from "./lib/preferences";
+import { formatSessionRef, sameSessionRef, sessionRefKey, type SessionRef } from "./lib/session-ref";
 import { clearSelectedSessionIf, setSelectedSession } from "./lib/session-selection";
 import { switchToSession, type SwitchResult } from "./lib/session-switch";
-import { launchHerdrInTerminal } from "./lib/terminal";
-import { ErrorView, runAction, shortcuts } from "./lib/ui";
+import { attachInTerminal } from "./lib/terminal";
+import { ErrorView, ShowLocalPathInFinderAction, runAction, shortcuts } from "./lib/ui";
 
 function switchMessage(result: SwitchResult): string {
   if (result.outcome === "revealed") return "Revealed its existing client";
   if (result.detached > 0) {
-    return `Detached ${result.detached} client${result.detached === 1 ? "" : "s"} of “${result.previous}”`;
+    return `Detached ${result.detached} client${result.detached === 1 ? "" : "s"} of “${formatSessionRef(result.previous)}”`;
   }
   return result.skipped ? `Attached alongside: ${result.skipped}` : "Attached alongside";
 }
@@ -27,35 +28,37 @@ export default function Command() {
   }
 
   // Every attach also selects: what the terminal shows is what Raycast controls.
-  async function attach(name: string, options: { newWindow?: boolean } = {}) {
+  async function attach(ref: SessionRef, options: { newWindow?: boolean } = {}) {
     const succeeded = await runAction(
       "Opening session",
       async () => {
         // Selected only once the terminal has the client, so a failed attach
         // never leaves Raycast pointed at a session it cannot show.
-        await launchHerdrInTerminal(["session", "attach", name], { includeSession: false, ...options });
-        await setSelectedSession(name);
+        await attachInTerminal(ref, options);
+        await setSelectedSession(ref);
       },
       { success: "Terminal Opened", onSuccess: selected.revalidate },
     );
     if (succeeded) await closeMainWindow({ clearRootSearch: true });
   }
 
-  async function switchTo(name: string) {
-    const succeeded = await runAction("Switching session", async () => switchMessage(await switchToSession(name)), {
-      success: `Switched to “${name}”`,
+  async function switchTo(ref: SessionRef) {
+    const succeeded = await runAction("Switching session", async () => switchMessage(await switchToSession(ref)), {
+      success: `Switched to “${formatSessionRef(ref)}”`,
       onSuccess: selected.revalidate,
     });
     if (succeeded) await closeMainWindow({ clearRootSearch: true });
   }
 
-  async function select(name: string) {
-    await runAction("Selecting session", () => setSelectedSession(name), {
+  async function select(ref: SessionRef) {
+    await runAction("Selecting session", () => setSelectedSession(ref), {
       success: "Session Selected",
       onSuccess: selected.revalidate,
     });
   }
 
+  // Manage Sessions lists the Local Host, so Stop and Delete name a Local Host
+  // Session outright; a Machine's Session is never stopped or deleted from here.
   async function stop(name: string) {
     if (
       !(await confirmAlert({
@@ -67,7 +70,7 @@ export default function Command() {
       return;
     await runAction(
       "Stopping session",
-      () => runHerdr(["session", "stop", name, "--json"], { session: "" }).then(() => undefined),
+      () => runHerdr(["session", "stop", name, "--json"], { ref: { name: "" } }).then(() => undefined),
       {
         success: "Session Stopped",
         onSuccess: sessions.revalidate,
@@ -87,8 +90,8 @@ export default function Command() {
     await runAction(
       "Deleting session",
       async () => {
-        await runHerdr(["session", "delete", name, "--json"], { session: "" });
-        await clearSelectedSessionIf(name);
+        await runHerdr(["session", "delete", name, "--json"], { ref: { name: "" } });
+        await clearSelectedSessionIf({ name });
       },
       {
         success: "Session Deleted",
@@ -105,6 +108,8 @@ export default function Command() {
         description="Open Herdr to create the default session."
       />
       {(sessions.data || []).map((session) => {
+        // `getSessions` lists the Local Host.
+        const ref: SessionRef = { name: session.name };
         // The preference decides which action Enter runs by ordering the two.
         // Both keep a fixed shortcut, so neither key changes meaning with it.
         const attachAction = (
@@ -113,7 +118,7 @@ export default function Command() {
             title={session.running ? "Attach in Terminal" : "Start and Attach in Terminal"}
             icon={Icon.Terminal}
             shortcut={shortcuts.attach}
-            onAction={() => attach(session.name)}
+            onAction={() => attach(ref)}
           />
         );
         const switchAction = (
@@ -122,7 +127,7 @@ export default function Command() {
             title={session.running ? "Switch to Session" : "Start and Switch to Session"}
             icon={Icon.Replace}
             shortcut={shortcuts.switchSession}
-            onAction={() => switchTo(session.name)}
+            onAction={() => switchTo(ref)}
           />
         );
         const newWindowAction = (
@@ -131,7 +136,7 @@ export default function Command() {
             title={session.running ? "Attach in New Window" : "Start and Attach in New Window"}
             icon={Icon.PlusTopRightSquare}
             shortcut={shortcuts.attachInNewWindow}
-            onAction={() => attach(session.name, { newWindow: true })}
+            onAction={() => attach(ref, { newWindow: true })}
           />
         );
         const selectAction = (
@@ -140,19 +145,19 @@ export default function Command() {
             title="Select Session"
             icon={Icon.Checkmark}
             shortcut={shortcuts.selectSession}
-            onAction={() => select(session.name)}
+            onAction={() => select(ref)}
           />
         );
         return (
           <List.Item
-            key={session.name}
+            key={sessionRefKey(ref)}
             icon={session.running ? { source: Icon.CircleFilled, tintColor: "#34C759" } : Icon.Circle}
             title={session.name}
             subtitle={session.session_dir}
             accessories={[
               { tag: session.running ? "Running" : "Stopped" },
               ...(session.default ? [{ tag: "Default" }] : []),
-              ...(session.name === selected.data ? [{ tag: "Selected" }] : []),
+              ...(sameSessionRef(ref, selected.data) ? [{ tag: "Selected" }] : []),
             ]}
             actions={
               <ActionPanel>
@@ -182,7 +187,7 @@ export default function Command() {
                   content={session.socket_path}
                   shortcut={shortcuts.copyId}
                 />
-                <Action.ShowInFinder path={session.session_dir} shortcut={shortcuts.copyPath} />
+                <ShowLocalPathInFinderAction path={session.session_dir} session={ref} shortcut={shortcuts.copyPath} />
                 <Action title="Refresh" icon={Icon.ArrowClockwise} shortcut={shortcuts.refresh} onAction={refresh} />
                 {enterAction === "switch" ? attachAction : switchAction}
                 {newWindowAction}

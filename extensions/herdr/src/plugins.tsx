@@ -2,7 +2,7 @@ import { Action, ActionPanel, Alert, Color, Form, Icon, List, confirmAlert, useN
 import { useCachedPromise } from "@raycast/utils";
 import { useState } from "react";
 import { runHerdr, runHerdrJson } from "./lib/herdr";
-import { runAction, shortcuts } from "./lib/ui";
+import { ShowLocalPathInFinderAction, runAction, shortcuts } from "./lib/ui";
 
 interface PluginActionInfo {
   plugin_id: string;
@@ -213,7 +213,7 @@ export default function Command() {
                   icon={Icon.Download}
                   target={<InstallPluginForm onDone={data.revalidate} />}
                 />
-                <Action.ShowInFinder path={plugin.plugin_root} shortcut={shortcuts.copyPath} />
+                <ShowLocalPathInFinderAction path={plugin.plugin_root} shortcut={shortcuts.copyPath} />
                 <Action.CopyToClipboard title="Copy Plugin ID" content={plugin.plugin_id} shortcut={shortcuts.copyId} />
                 <Action
                   title="Uninstall Plugin"
