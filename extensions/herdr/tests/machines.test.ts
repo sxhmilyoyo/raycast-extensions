@@ -1,6 +1,13 @@
 import { execFile } from "node:child_process";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { duplicateMachineIds, findMachine, listMachines, sessionRefPresence } from "../src/lib/machines";
+import {
+  duplicateMachineIds,
+  findMachine,
+  listMachines,
+  removeMachine,
+  sessionRefPresence,
+  setMachineEnabled,
+} from "../src/lib/machines";
 import type { Machine } from "../src/lib/types";
 import { cddMeshclaw, remote } from "./helpers/machines";
 import { storage } from "./helpers/raycast-api";
@@ -21,10 +28,18 @@ beforeEach(() => {
   vi.mocked(execFile).mockReset();
 });
 
-function mockMachineList(stdout: string) {
+function mockHerdrOutput(stdout: string) {
   vi.mocked(execFile).mockImplementation(((...callArgs: unknown[]) => {
     const callback = callArgs.at(-1) as (error: Error | null, stdout: string, stderr: string) => void;
     callback(null, stdout, "");
+    return {};
+  }) as never);
+}
+
+function mockHerdrFailure(stderr: string, code: number) {
+  vi.mocked(execFile).mockImplementation(((...callArgs: unknown[]) => {
+    const callback = callArgs.at(-1) as (error: Error | null, stdout: string, stderr: string) => void;
+    callback(Object.assign(new Error("Command failed"), { code }), "", stderr);
     return {};
   }) as never);
 }
@@ -37,16 +52,52 @@ describe("listMachines", () => {
   // The catalog is Herdr's and spans Sessions, so the call carries no --session
   // even while a Preferred Session is configured.
   it("reads Herdr's Machines without naming a Session", async () => {
-    mockMachineList(JSON.stringify([cddMeshclaw]));
+    mockHerdrOutput(JSON.stringify([cddMeshclaw]));
 
     await expect(listMachines()).resolves.toEqual([cddMeshclaw]);
     expect(executedArgs()).toEqual(["machine", "list", "--json"]);
   });
 
   it("returns no machines when none are saved", async () => {
-    mockMachineList("[]\n");
+    mockHerdrOutput("[]\n");
 
     await expect(listMachines()).resolves.toEqual([]);
+  });
+
+  // Herdr before 0.9 has no `machine` command at all: a Herdr with no Machines,
+  // not a failed listing, so Manage Sessions stays as it was.
+  it("treats a Herdr without the machine command as having no Machines", async () => {
+    mockHerdrFailure("unknown command: machine\nrun 'herdr --help' for usage\n", 2);
+
+    await expect(listMachines()).resolves.toEqual([]);
+  });
+
+  it("reports any other listing failure", async () => {
+    mockHerdrFailure("error: the saved-machine file could not be read\n", 1);
+
+    await expect(listMachines()).rejects.toMatchObject({ code: "command_failed" });
+  });
+});
+
+// Machine management is Herdr's own `machine` command family, run on the Local
+// Host: it is never routed through --machine, and it names no Session.
+describe("machine management", () => {
+  it("disables and enables a Machine by id", async () => {
+    mockHerdrOutput("");
+
+    await setMachineEnabled(cddMeshclaw.id, false);
+    expect(executedArgs()).toEqual(["machine", "disable", cddMeshclaw.id]);
+
+    vi.mocked(execFile).mockClear();
+    await setMachineEnabled(cddMeshclaw.id, true);
+    expect(executedArgs()).toEqual(["machine", "enable", cddMeshclaw.id]);
+  });
+
+  it("removes a Machine by id", async () => {
+    mockHerdrOutput("");
+
+    await removeMachine(cddMeshclaw.id);
+    expect(executedArgs()).toEqual(["machine", "remove", cddMeshclaw.id]);
   });
 });
 

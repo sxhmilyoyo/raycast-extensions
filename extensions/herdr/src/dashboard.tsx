@@ -4,8 +4,8 @@ import { CreateWorkspaceForm } from "./components/create-workspace-form";
 import { AgentActions, PaneActions, TabActions, WorkspaceActions } from "./components/resource-actions";
 import { StartAgentForm } from "./components/start-agent-form";
 import { useHerdrSnapshot } from "./hooks/use-herdr-snapshot";
+import { useSessionTitle } from "./hooks/use-session-title";
 import { agentIcon, agentName } from "./lib/agent-appearance";
-import { formatSessionRef } from "./lib/session-ref";
 import type { PaneInfo } from "./lib/types";
 import {
   ErrorView,
@@ -25,6 +25,7 @@ function paneLabel(pane: PaneInfo): string {
 
 export default function Command() {
   const snapshot = useHerdrSnapshot();
+  const title = useSessionTitle(snapshot.ref);
   const [scope, setScope] = useState<Scope>("all");
   const data = snapshot.data;
 
@@ -52,8 +53,8 @@ export default function Command() {
     <List
       isLoading={snapshot.isLoading}
       searchBarPlaceholder={
-        snapshot.ref
-          ? `Search workspaces, tabs, panes, agents, paths in ${formatSessionRef(snapshot.ref)}…`
+        title
+          ? `Search workspaces, tabs, panes, agents, paths in ${title}…`
           : "Search workspaces, tabs, panes, agents, paths…"
       }
       actions={

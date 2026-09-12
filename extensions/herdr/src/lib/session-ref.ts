@@ -19,6 +19,11 @@ export function sessionRefKey(ref: SessionRef): string {
   return ref.machine ? `machine:${ref.machine}` : ref.name;
 }
 
+/** The ref that selects a Machine's Session. */
+export function machineSessionRef(machine: Machine): SessionRef {
+  return { machine: machine.id, name: machine.session };
+}
+
 /** The first eight characters of a Machine id, for text that has no label to show. */
 export function shortMachineId(id: string): string {
   return id.slice(0, 8);

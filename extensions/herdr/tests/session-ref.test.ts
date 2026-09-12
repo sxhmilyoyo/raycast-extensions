@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   formatSessionRef,
+  machineSessionRef,
   parseSessionRef,
   sameSessionRef,
   serializeSessionRef,
@@ -38,6 +39,12 @@ describe("formatSessionRef", () => {
   it("falls back to a short id when the Machine is not in the list", () => {
     expect(formatSessionRef({ machine: machineId, name: "meshclaw" })).toBe("meshclaw on machine 368dca28");
     expect(formatSessionRef({ machine: machineId, name: "meshclaw" }, [])).toBe("meshclaw on machine 368dca28");
+  });
+});
+
+describe("machineSessionRef", () => {
+  it("selects a Machine by its id and keeps its remote Session's name", () => {
+    expect(machineSessionRef(cddMeshclaw)).toStrictEqual({ machine: machineId, name: "meshclaw" });
   });
 });
 
