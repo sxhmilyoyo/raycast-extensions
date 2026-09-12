@@ -3,8 +3,8 @@ import { useState } from "react";
 import { AgentActions } from "./components/resource-actions";
 import { StartAgentForm } from "./components/start-agent-form";
 import { useHerdrSnapshot } from "./hooks/use-herdr-snapshot";
+import { useSessionTitle } from "./hooks/use-session-title";
 import { agentIcon, agentName } from "./lib/agent-appearance";
-import { formatSessionRef } from "./lib/session-ref";
 import type { AgentStatus } from "./lib/types";
 import { ErrorView, ManageSessionsAction, shortcuts, statusIcon, statusTitle } from "./lib/ui";
 
@@ -12,6 +12,7 @@ type Filter = "all" | AgentStatus;
 
 export default function Command() {
   const snapshot = useHerdrSnapshot();
+  const title = useSessionTitle(snapshot.ref);
   const [filter, setFilter] = useState<Filter>("all");
   if (snapshot.error && !snapshot.data) return <ErrorView error={snapshot.error} onRetry={snapshot.revalidate} />;
   const allAgents = snapshot.data?.agents || [];
@@ -21,9 +22,7 @@ export default function Command() {
     <List
       isLoading={snapshot.isLoading}
       searchBarPlaceholder={
-        snapshot.ref
-          ? `Search agents, names, projects, paths in ${formatSessionRef(snapshot.ref)}…`
-          : "Search agents, names, projects, paths…"
+        title ? `Search agents, names, projects, paths in ${title}…` : "Search agents, names, projects, paths…"
       }
       actions={
         <ActionPanel>

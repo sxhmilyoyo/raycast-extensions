@@ -14,7 +14,8 @@ import {
   showToast,
 } from "@raycast/api";
 import { useCachedPromise } from "@raycast/utils";
-import { formatHerdrError, getSessions, stoppedSessionOf } from "./herdr";
+import { useSessionTitle } from "../hooks/use-session-title";
+import { formatHerdrError, getSessions, stoppedSessionOf, updateRequiredFor } from "./herdr";
 import { showLocalPathInFinder } from "./host-paths";
 import { listMachines, sessionRefPresence } from "./machines";
 import { formatSessionRef, type SessionRef } from "./session-ref";
@@ -145,6 +146,20 @@ export function ManageSessionsAction({ title = "Manage Sessions…" }: { title?:
   );
 }
 
+/** Attach `session` in a Terminal Pane from a recovery view, closing Raycast once the terminal has it. */
+function AttachSessionAction({ session, title, progress }: { session: SessionRef; title: string; progress: string }) {
+  return (
+    <Action
+      title={title}
+      icon={Icon.Terminal}
+      onAction={async () => {
+        const succeeded = await runAction(progress, () => attachInTerminal(session), { success: "Terminal Opened" });
+        if (succeeded) await closeMainWindow({ clearRootSearch: true });
+      }}
+    />
+  );
+}
+
 // Reads never start a session, so a Stopped Selected Session is shown as such;
 // attaching through the terminal is the only way to start it from here. Herdr
 // reports a session that does not exist the same way, and `herdr --session`
@@ -173,16 +188,7 @@ function SessionStoppedView({ session, onRetry }: { session: SessionRef; onRetry
       actions={
         <ActionPanel>
           {presence !== "listed" ? null : (
-            <Action
-              title="Start and Attach in Terminal"
-              icon={Icon.Terminal}
-              onAction={async () => {
-                const succeeded = await runAction("Starting session", () => attachInTerminal(session), {
-                  success: "Terminal Opened",
-                });
-                if (succeeded) await closeMainWindow({ clearRootSearch: true });
-              }}
-            />
+            <AttachSessionAction session={session} title="Start and Attach in Terminal" progress="Starting session" />
           )}
           <ManageSessionsAction title="Choose Another Session" />
           {onRetry ? (
@@ -195,7 +201,34 @@ function SessionStoppedView({ session, onRetry }: { session: SessionRef; onRetry
   );
 }
 
+// Reaching a Machine's Session needs a Herdr that accepts --machine on this Mac
+// and on the Machine. Herdr 0.9.0 rejects the option before running anything, so
+// nothing was read; the view says what to update rather than failing the read.
+// Remote Attach needs no such build, so attaching is still offered.
+function HerdrUpdateRequiredView({ session, onRetry }: { session: SessionRef; onRetry?: () => void }) {
+  const title = useSessionTitle(session) ?? formatSessionRef(session);
+  const markdown = `# Herdr needs an update to reach “${title}”\n\nReading and controlling a Machine's session from Raycast needs a Herdr that accepts \`--machine\`, on this Mac and on the Machine. Update both and try again, or choose another session for Raycast to control.\n\nAttaching does not need the update: Attach opens “${title}” in your terminal through Herdr's remote attach.`;
+  return (
+    <Detail
+      markdown={markdown}
+      actions={
+        <ActionPanel>
+          <AttachSessionAction session={session} title="Attach in Terminal" progress="Opening session" />
+          <ManageSessionsAction title="Choose Another Session" />
+          <Action.OpenInBrowser title="Open Herdr Update Guide" url="https://herdr.dev/docs/install/#update" />
+          {onRetry ? (
+            <Action title="Try Again" icon={Icon.ArrowClockwise} shortcut={shortcuts.refresh} onAction={onRetry} />
+          ) : null}
+          <Action title="Open Extension Preferences…" icon={Icon.Gear} onAction={openExtensionPreferences} />
+        </ActionPanel>
+      }
+    />
+  );
+}
+
 export function ErrorView({ error, onRetry }: { error: unknown; onRetry?: () => void }) {
+  const updateRequired = updateRequiredFor(error);
+  if (updateRequired) return <HerdrUpdateRequiredView session={updateRequired} onRetry={onRetry} />;
   const stoppedSession = stoppedSessionOf(error);
   if (stoppedSession) return <SessionStoppedView session={stoppedSession} onRetry={onRetry} />;
   const formatted = formatHerdrError(error);

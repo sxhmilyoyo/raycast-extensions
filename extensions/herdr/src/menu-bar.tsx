@@ -10,8 +10,16 @@ import {
 import { useCachedPromise } from "@raycast/utils";
 import { useHerdrSnapshot } from "./hooks/use-herdr-snapshot";
 import { agentIcon, agentName } from "./lib/agent-appearance";
-import { focusResource, formatHerdrError, getAgentTarget, getSessions, stoppedSessionOf } from "./lib/herdr";
-import { listMachines, sessionRefPresence } from "./lib/machines";
+import {
+  focusResource,
+  formatHerdrError,
+  getAgentTarget,
+  getSessions,
+  stoppedSessionOf,
+  updateRequiredFor,
+  type SessionListState,
+} from "./lib/herdr";
+import { listMachines, sessionRefPresence, type MachineListState } from "./lib/machines";
 import { getHerdrPreferences } from "./lib/preferences";
 import { formatSessionRef } from "./lib/session-ref";
 import { launchHerdrInTerminal, revealFocusedHerdr } from "./lib/terminal";
@@ -52,6 +60,54 @@ async function openHerdr(): Promise<void> {
   } catch (error) {
     await reportFailure(error);
   }
+}
+
+/** What the menu bar shows in place of the agent list when the Snapshot could not be read. */
+interface Problem {
+  tooltip: string;
+  /** The one item offered, and whether it opens Manage Sessions rather than Herdr itself. */
+  title: string;
+  icon: Icon;
+  opensManageSessions: boolean;
+}
+
+// Herdr reports a missing session as not running too, and starting it would
+// create it, so Start and Attach is offered only once a list has confirmed the
+// Session. A Machine's Session needs a Herdr that accepts --machine first.
+function describeProblem(error: unknown, sessions: SessionListState, machines: MachineListState): Problem | undefined {
+  if (!error) return undefined;
+  const updateRequired = updateRequiredFor(error);
+  if (updateRequired) {
+    const title = formatSessionRef(updateRequired, machines.data);
+    return {
+      tooltip: `Herdr · needs an update to reach ${title}`,
+      title: `Herdr Needs an Update to Reach “${title}” — Manage Sessions…`,
+      icon: Icon.Download,
+      opensManageSessions: true,
+    };
+  }
+  const stopped = stoppedSessionOf(error);
+  if (stopped) {
+    const title = formatSessionRef(stopped, machines.data);
+    const presence = sessionRefPresence(stopped, sessions, machines);
+    return {
+      tooltip: `Herdr · ${title} is stopped`,
+      title:
+        presence === "listed"
+          ? `Session “${title}” Is Stopped — Start and Attach`
+          : presence === "missing"
+            ? `Session “${title}” Not Found — Manage Sessions…`
+            : `Session “${title}” Is Stopped — Manage Sessions…`,
+      icon: Icon.Circle,
+      opensManageSessions: presence !== "listed",
+    };
+  }
+  return {
+    tooltip: "Herdr is unavailable",
+    title: "Herdr Unavailable — Open Herdr",
+    icon: Icon.ExclamationMark,
+    opensManageSessions: false,
+  };
 }
 
 function AgentItem({ agent, snapshot }: { agent: AgentInfo; snapshot: HerdrSnapshot }) {
@@ -95,20 +151,20 @@ export default function Command() {
             : undefined;
   const leadingCount = leadingStatus ? groups.get(leadingStatus)?.length : undefined;
   const stoppedSession = stoppedSessionOf(snapshot.error);
-  // Herdr reports a missing session as not running too, and starting it would
-  // create it, so a list is consulted only while one reads as stopped, and Start
-  // is offered only once that list has confirmed the Session: `session list`
-  // for the Local Host, the machine list for a Machine's Session.
+  const updateRequired = updateRequiredFor(snapshot.error);
+  // A list is consulted only while the Snapshot reads as Stopped or as needing
+  // an update, the menu bar's one exception to its no-extra-subprocess rule
+  // (ADR-0002): `session list` for a Local Host Session, the machine list for a
+  // Machine's Session and its label.
   const sessions = useCachedPromise(getSessions, [], {
     execute: stoppedSession !== undefined && !stoppedSession.machine,
     keepPreviousData: true,
   });
   const machines = useCachedPromise(listMachines, [], {
-    execute: Boolean(stoppedSession?.machine),
+    execute: Boolean(stoppedSession?.machine) || updateRequired !== undefined,
     keepPreviousData: true,
   });
-  const presence = stoppedSession === undefined ? "unknown" : sessionRefPresence(stoppedSession, sessions, machines);
-  const stoppedTitle = stoppedSession ? formatSessionRef(stoppedSession, machines.data) : undefined;
+  const problem = describeProblem(snapshot.error, sessions, machines);
 
   if (!visible) return null;
 
@@ -118,37 +174,27 @@ export default function Command() {
       icon={leadingStatus ? statusIcon(leadingStatus) : Icon.Terminal}
       title={leadingCount ? String(leadingCount) : undefined}
       tooltip={
-        stoppedTitle
-          ? `Herdr · ${stoppedTitle} is stopped`
-          : snapshot.error
-            ? "Herdr is unavailable"
-            : [
-                "Herdr",
-                snapshot.ref ? formatSessionRef(snapshot.ref) : undefined,
-                `${blocked.length} need attention`,
-                `${done.length} done`,
-                `${working.length} working`,
-                `${idle.length} idle`,
-                `${unknown.length} unknown`,
-              ]
-                .filter(Boolean)
-                .join(" · ")
+        problem
+          ? problem.tooltip
+          : [
+              "Herdr",
+              snapshot.ref ? formatSessionRef(snapshot.ref, machines.data) : undefined,
+              `${blocked.length} need attention`,
+              `${done.length} done`,
+              `${working.length} working`,
+              `${idle.length} idle`,
+              `${unknown.length} unknown`,
+            ]
+              .filter(Boolean)
+              .join(" · ")
       }
     >
-      {snapshot.error ? (
+      {problem ? (
         <MenuBarExtra.Item
-          title={
-            presence === "listed"
-              ? `Session “${stoppedTitle}” Is Stopped — Start and Attach`
-              : presence === "missing"
-                ? `Session “${stoppedTitle}” Not Found — Manage Sessions…`
-                : stoppedSession
-                  ? `Session “${stoppedTitle}” Is Stopped — Manage Sessions…`
-                  : "Herdr Unavailable — Open Herdr"
-          }
-          icon={stoppedSession ? Icon.Circle : Icon.ExclamationMark}
+          title={problem.title}
+          icon={problem.icon}
           onAction={() =>
-            void (stoppedSession && presence !== "listed"
+            void (problem.opensManageSessions
               ? launchCommand({ name: "sessions", type: LaunchType.UserInitiated })
               : openHerdr())
           }

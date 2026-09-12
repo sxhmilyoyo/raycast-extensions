@@ -337,6 +337,11 @@ export function sessionPresence(list: SessionListState, name: string): SessionPr
   return list.data.some((session) => session.name === name) ? "listed" : "missing";
 }
 
+/** The Session a failure names when Herdr rejected the --machine prefix, so views can show the update state. */
+export function updateRequiredFor(error: unknown): SessionRef | undefined {
+  return error instanceof HerdrError && error.code === "machine_prefix_unsupported" ? error.session : undefined;
+}
+
 /** The Session a failure names when its server is Stopped, so views can offer to start it. */
 export function stoppedSessionOf(error: unknown): SessionRef | undefined {
   return error instanceof HerdrError && error.code === "session_not_running" ? error.session : undefined;

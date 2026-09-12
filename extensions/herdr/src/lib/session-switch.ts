@@ -1,5 +1,6 @@
 import { HerdrError } from "./herdr";
 import { formatSessionRef, sameSessionRef, type SessionRef } from "./session-ref";
+import type { Machine } from "./types";
 import { resolveSessionRef, setSelectedSession } from "./session-selection";
 import {
   attachInTerminal,
@@ -23,6 +24,8 @@ export type Kill = (pid: number, signal: NodeJS.Signals) => void;
 
 interface SwitchOptions {
   kill?: Kill;
+  /** Herdr's Machines, so messages can name a Machine's Session by its label. */
+  machines?: Machine[];
   /** How long to wait for the new Client to become discoverable. */
   confirmTimeoutMs?: number;
   confirmPollMs?: number;
@@ -115,8 +118,8 @@ function replacementTest(
 export async function switchToSession(target: SessionRef, options: SwitchOptions = {}): Promise<SwitchResult> {
   const kill = options.kill ?? ((pid, signal) => process.kill(pid, signal));
   const previous = await resolveSessionRef();
-  const targetTitle = formatSessionRef(target);
-  const previousTitle = formatSessionRef(previous);
+  const targetTitle = formatSessionRef(target, options.machines);
+  const previousTitle = formatSessionRef(previous, options.machines);
 
   if ((await focusExistingHerdrClient(target)) === "focused") {
     await setSelectedSession(target);

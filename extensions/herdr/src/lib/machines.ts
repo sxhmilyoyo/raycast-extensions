@@ -1,4 +1,11 @@
-import { HerdrError, runHerdrJson, sessionPresence, type SessionListState, type SessionPresence } from "./herdr";
+import {
+  HerdrError,
+  runHerdr,
+  runHerdrJson,
+  sessionPresence,
+  type SessionListState,
+  type SessionPresence,
+} from "./herdr";
 import { shortMachineId, type SessionRef } from "./session-ref";
 import type { Machine } from "./types";
 
@@ -7,8 +14,23 @@ import type { Machine } from "./types";
  * opts out of the --session flag.
  */
 export async function listMachines(): Promise<Machine[]> {
-  const rows = await runHerdrJson<Machine[]>(["machine", "list", "--json"], { ref: { name: "" } });
-  return Array.isArray(rows) ? rows : [];
+  try {
+    const rows = await runHerdrJson<Machine[]>(["machine", "list", "--json"], { ref: { name: "" } });
+    return Array.isArray(rows) ? rows : [];
+  } catch (error) {
+    // Herdr before 0.9 has no `machine` command at all: a Herdr with no
+    // Machines, not a failed listing.
+    if (isUnknownCommand(error)) return [];
+    throw error;
+  }
+}
+
+function isUnknownCommand(error: unknown): boolean {
+  return (
+    error instanceof HerdrError &&
+    error.code === "command_failed" &&
+    /\bunknown command: machine\b/.test(error.detail ?? "")
+  );
 }
 
 /**
@@ -22,6 +44,19 @@ export function duplicateMachineIds(machines: Machine[]): Set<string> {
     idsByRemote.set(remote, [...(idsByRemote.get(remote) ?? []), machine.id]);
   }
   return new Set([...idsByRemote.values()].filter((ids) => ids.length > 1).flat());
+}
+
+/**
+ * Enables or disables a Machine: Herdr's own `machine enable|disable <id>`,
+ * run on the Local Host. Disabling keeps the Machine for later.
+ */
+export async function setMachineEnabled(id: string, enabled: boolean): Promise<void> {
+  await runHerdr(["machine", enabled ? "enable" : "disable", id], { ref: { name: "" } });
+}
+
+/** Forgets a Machine with Herdr's `machine remove <id>`. The server on its Remote Host, and its Session, keep running. */
+export async function removeMachine(id: string): Promise<void> {
+  await runHerdr(["machine", "remove", id], { ref: { name: "" } });
 }
 
 /** The Machine with `id`, if it is still saved. Labels rename freely, so lookups go by id. */

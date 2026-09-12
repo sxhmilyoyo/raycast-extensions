@@ -11,6 +11,7 @@ import {
   resolveHerdrBinary,
   runHerdr,
   sessionPresence,
+  updateRequiredFor,
 } from "../src/lib/herdr";
 import { setSelectedSession } from "../src/lib/session-selection";
 import { remote } from "./helpers/machines";
@@ -197,6 +198,9 @@ describe("runHerdr for a Machine", () => {
     const failure = await runHerdr(["api", "snapshot"]).catch((error: unknown) => error);
     expect(failure).toMatchObject({ code: "machine_prefix_unsupported", session: remote });
     expect(execFile).toHaveBeenCalledTimes(1);
+    // Views route on this accessor, which names the Session the update is for.
+    expect(updateRequiredFor(failure)).toEqual(remote);
+    expect(updateRequiredFor(new Error("anything else"))).toBeUndefined();
   });
 
   it("reports a Stopped remote Session from the server_not_running envelope", async () => {
