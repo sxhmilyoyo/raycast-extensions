@@ -5,6 +5,7 @@ import { AgentActions, PaneActions, TabActions, WorkspaceActions } from "./compo
 import { StartAgentForm } from "./components/start-agent-form";
 import { useHerdrSnapshot } from "./hooks/use-herdr-snapshot";
 import { agentIcon, agentName } from "./lib/agent-appearance";
+import { formatSessionRef } from "./lib/session-ref";
 import type { PaneInfo } from "./lib/types";
 import {
   ErrorView,
@@ -51,8 +52,8 @@ export default function Command() {
     <List
       isLoading={snapshot.isLoading}
       searchBarPlaceholder={
-        snapshot.session
-          ? `Search workspaces, tabs, panes, agents, paths in ${snapshot.session}…`
+        snapshot.ref
+          ? `Search workspaces, tabs, panes, agents, paths in ${formatSessionRef(snapshot.ref)}…`
           : "Search workspaces, tabs, panes, agents, paths…"
       }
       actions={

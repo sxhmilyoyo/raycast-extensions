@@ -4,12 +4,14 @@ import { delimiter, join } from "node:path";
 import { homedir } from "node:os";
 import { execFile } from "node:child_process";
 import { getHerdrPreferences } from "./preferences";
-import { resolveSession } from "./session-selection";
+import { formatSessionRef, type SessionRef } from "./session-ref";
+import { resolveSessionRef } from "./session-selection";
 import type { HerdrSession, HerdrSnapshot, PaneInfo } from "./types";
 
 interface RunOptions {
   timeout?: number;
-  session?: string;
+  /** The Session to target. An empty name opts out of the --session flag. */
+  ref?: SessionRef;
   signal?: AbortSignal;
 }
 
@@ -26,7 +28,7 @@ export class HerdrError extends Error {
     message: string,
     readonly code?: string,
     readonly detail?: string,
-    readonly session?: string,
+    readonly session?: SessionRef,
   ) {
     super(message);
     this.name = "HerdrError";
@@ -112,17 +114,34 @@ function isStoppedSessionStderr(stderr: string): boolean {
   return /ConnectionRefused|Connection refused/.test(stderr);
 }
 
-function stoppedSessionError(session: string, detail: string): HerdrError {
-  return new HerdrError(`Herdr session “${session}” is stopped`, "session_not_running", detail, session);
+function stoppedSessionError(ref: SessionRef, detail: string): HerdrError {
+  return new HerdrError(`Herdr session “${formatSessionRef(ref)}” is stopped`, "session_not_running", detail, ref);
+}
+
+// Herdr 0.9.0 and earlier do not know the --machine prefix and reject it before
+// running anything: an out-of-date Herdr, not a failed read.
+function isMachinePrefixRejected(stderr: string): boolean {
+  return /\bunknown option: --machine\b/.test(stderr);
+}
+
+function machinePrefixUnsupportedError(ref: SessionRef): HerdrError {
+  return new HerdrError(
+    "Herdr needs an update to reach Machines",
+    "machine_prefix_unsupported",
+    "Update Herdr on this Mac and on the Machine to a version that accepts --machine, then try again.",
+    ref,
+  );
 }
 
 export async function runHerdr(args: string[], options: RunOptions = {}): Promise<string> {
   const binary = await resolveHerdrBinary();
-  const session = await resolveSession(options.session);
-  // Without --session the CLI falls back to an inherited HERDR_SESSION, so the
-  // session is always named explicitly. An empty session opts out for
-  // commands that span sessions.
-  const sessionArgs = session ? ["--session", session] : [];
+  const ref = await resolveSessionRef(options.ref);
+  // A Machine's Session is reached through Herdr's --machine prefix, which
+  // routes the command over Herdr's own bridge; --session would name a Local
+  // Host Session instead. Without --session the CLI falls back to an inherited
+  // HERDR_SESSION, so a Local Host Session is always named explicitly, and an
+  // empty name opts out for commands that span sessions.
+  const sessionArgs = ref.machine ? ["--machine", ref.machine] : ref.name ? ["--session", ref.name] : [];
 
   return new Promise<string>((resolve, reject) => {
     execFile(
@@ -137,18 +156,18 @@ export async function runHerdr(args: string[], options: RunOptions = {}): Promis
       (error, stdout, stderr) => {
         const cliError = extractCliError(stderr);
         if (cliError) {
-          if (session && cliError.code === STOPPED_SESSION_CODE)
-            return reject(stoppedSessionError(session, cliError.detail ?? ""));
+          if (ref.name && cliError.code === STOPPED_SESSION_CODE)
+            return reject(stoppedSessionError(ref, cliError.detail ?? ""));
           return reject(cliError);
         }
         if (error) {
           const detail = stderr.trim() || stdout.trim() || error.message;
           const timedOut = "killed" in error && error.killed;
+          if (ref.machine && isMachinePrefixRejected(stderr)) return reject(machinePrefixUnsupportedError(ref));
           // Read from stderr alone, and only when the command ran to
           // completion: `pane read` puts raw terminal text on stdout, which can
           // quote a refused connection of its own.
-          if (session && !timedOut && isStoppedSessionStderr(stderr))
-            return reject(stoppedSessionError(session, detail));
+          if (ref.name && !timedOut && isStoppedSessionStderr(stderr)) return reject(stoppedSessionError(ref, detail));
           return reject(
             new HerdrError(
               timedOut ? "The Herdr command timed out" : "Unable to run the Herdr command",
@@ -175,14 +194,16 @@ export async function runHerdrJson<T>(args: string[], options: RunOptions = {}):
   }
 }
 
-export async function getSnapshot(signal?: AbortSignal, session?: string): Promise<HerdrSnapshot> {
-  const result = await runHerdrJson<{ snapshot: HerdrSnapshot }>(["api", "snapshot"], { signal, session });
+export async function getSnapshot(signal?: AbortSignal, ref?: SessionRef): Promise<HerdrSnapshot> {
+  const result = await runHerdrJson<{ snapshot: HerdrSnapshot }>(["api", "snapshot"], { signal, ref });
   if (!result.snapshot) throw new HerdrError("Herdr did not return a session snapshot", "invalid_snapshot");
   return result.snapshot;
 }
 
 export async function getSessions(): Promise<HerdrSession[]> {
-  const response = await runHerdrJson<{ sessions: HerdrSession[] }>(["session", "list", "--json"], { session: "" });
+  const response = await runHerdrJson<{ sessions: HerdrSession[] }>(["session", "list", "--json"], {
+    ref: { name: "" },
+  });
   return response.sessions ?? [];
 }
 
@@ -309,13 +330,15 @@ export interface SessionListState {
  * meantime would otherwise still read as listed. Anything else is unknown, and
  * unknown never earns a start.
  */
-export function sessionPresence(list: SessionListState, name: string): "listed" | "missing" | "unknown" {
+export type SessionPresence = "listed" | "missing" | "unknown";
+
+export function sessionPresence(list: SessionListState, name: string): SessionPresence {
   if (list.isLoading || list.error !== undefined || list.data === undefined) return "unknown";
   return list.data.some((session) => session.name === name) ? "listed" : "missing";
 }
 
 /** The Session a failure names when its server is Stopped, so views can offer to start it. */
-export function stoppedSessionOf(error: unknown): string | undefined {
+export function stoppedSessionOf(error: unknown): SessionRef | undefined {
   return error instanceof HerdrError && error.code === "session_not_running" ? error.session : undefined;
 }
 

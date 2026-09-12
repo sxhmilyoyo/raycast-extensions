@@ -1,9 +1,10 @@
 import { HerdrError } from "./herdr";
-import { resolveSession, setSelectedSession } from "./session-selection";
+import { formatSessionRef, sameSessionRef, type SessionRef } from "./session-ref";
+import { resolveSessionRef, setSelectedSession } from "./session-selection";
 import {
+  attachInTerminal,
   focusExistingHerdrClient,
   hasCustomTerminalLauncher,
-  launchHerdrInTerminal,
   locateTerminalPaneClients,
   type LocatedClient,
 } from "./terminal";
@@ -12,7 +13,7 @@ export interface SwitchResult {
   /** The target's existing Client was revealed, or a new one was attached. */
   outcome: "revealed" | "attached";
   /** The Session that was selected before the switch. */
-  previous: string;
+  previous: SessionRef;
   detached: number;
   /** Why the new Client was attached alongside instead of replacing one. */
   skipped?: string;
@@ -35,18 +36,18 @@ function delay(ms: number): Promise<void> {
 }
 
 /**
- * The pids of the Clients of `session` that own a Terminal Pane right now, or
+ * The pids of the Clients of `ref` that own a Terminal Pane right now, or
  * undefined when the lookup failed: an empty set would read as "none open" and
  * let a Client that was already there pass for a new one.
  */
-async function terminalPaneClientPids(session: string): Promise<Set<string> | undefined> {
-  const located = await locateTerminalPaneClients(session);
+async function terminalPaneClientPids(ref: SessionRef): Promise<Set<string> | undefined> {
+  const located = await locateTerminalPaneClients(ref);
   if (located.status === "unavailable") return undefined;
   return new Set(located.status === "found" ? located.clients.map((client) => client.pid) : []);
 }
 
 /**
- * Waits until a Client of `session` that `isReplacement` accepts owns a Terminal
+ * Waits until a Client of `ref` that `isReplacement` accepts owns a Terminal
  * Pane. A spawn only proves the Terminal Application ran the command: Herdr can
  * still exit afterwards, on a protocol mismatch or a refused nested launch, so
  * nothing is detached until the Client is actually there.
@@ -60,7 +61,7 @@ async function terminalPaneClientPids(session: string): Promise<Set<string> | un
 type Confirmation = { status: "attached"; client: LocatedClient } | { status: "unverifiable" } | { status: "missing" };
 
 async function confirmClientAttached(
-  session: string,
+  ref: SessionRef,
   isReplacement: (client: LocatedClient) => boolean,
   strict: boolean,
   timeoutMs: number,
@@ -68,7 +69,7 @@ async function confirmClientAttached(
 ): Promise<Confirmation> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
-    const located = await locateTerminalPaneClients(session);
+    const located = await locateTerminalPaneClients(ref);
     const client = located.status === "found" ? located.clients.find(isReplacement) : undefined;
     if (client) return { status: "attached", client };
     if (located.status === "unavailable" && !strict) return { status: "unverifiable" };
@@ -111,9 +112,11 @@ function replacementTest(
  * detached: one replacement cannot stand in for Clients in other windows, and
  * signaling those would close windows the user still wanted.
  */
-export async function switchToSession(target: string, options: SwitchOptions = {}): Promise<SwitchResult> {
+export async function switchToSession(target: SessionRef, options: SwitchOptions = {}): Promise<SwitchResult> {
   const kill = options.kill ?? ((pid, signal) => process.kill(pid, signal));
-  const previous = await resolveSession();
+  const previous = await resolveSessionRef();
+  const targetTitle = formatSessionRef(target);
+  const previousTitle = formatSessionRef(previous);
 
   if ((await focusExistingHerdrClient(target)) === "focused") {
     await setSelectedSession(target);
@@ -122,28 +125,31 @@ export async function switchToSession(target: string, options: SwitchOptions = {
 
   // Switching to the already Selected Session has nothing to detach: its own
   // Clients are the ones a detach would target. A custom launcher places the
-  // Client where the extension cannot see it, so there is nothing to confirm
-  // against and no window to reuse; the switch is an attach plus a selection.
-  const custom = hasCustomTerminalLauncher();
-  const location =
-    previous === target
-      ? ({ status: "unavailable", reason: `“${target}” is already the selected session` } as const)
-      : custom
-        ? ({ status: "unavailable", reason: "a custom terminal launcher places the client itself" } as const)
-        : await locateTerminalPaneClients(previous);
+  // Client where the extension cannot see it, and a Machine's Clients are not
+  // recognized in the process table yet; either way there is nothing to confirm
+  // against and no window to reuse, so the switch is an attach plus a selection.
+  const unverifiable = hasCustomTerminalLauncher()
+    ? "a custom terminal launcher places the client itself"
+    : target.machine
+      ? `clients of “${targetTitle}” cannot be located yet`
+      : undefined;
+  const location = sameSessionRef(previous, target)
+    ? ({ status: "unavailable", reason: `“${targetTitle}” is already the selected session` } as const)
+    : unverifiable
+      ? ({ status: "unavailable", reason: unverifiable } as const)
+      : await locateTerminalPaneClients(previous);
 
   // Recorded before the launch, and only when Clients are at stake: the switch
   // then knows which Clients of the target it must not mistake for the new one.
   const detachPlanned = location.status === "found";
   const alreadyOpen = detachPlanned ? await terminalPaneClientPids(target) : undefined;
 
-  const launched = await launchHerdrInTerminal(["session", "attach", target], {
-    includeSession: false,
+  const launched = await attachInTerminal(target, {
     windowId: location.status === "found" ? location.windowId : undefined,
     wezTermListing: location.status === "found" ? location.listing : undefined,
   });
 
-  const confirmation: Confirmation = custom
+  const confirmation: Confirmation = unverifiable
     ? { status: "unverifiable" }
     : await confirmClientAttached(
         target,
@@ -154,9 +160,9 @@ export async function switchToSession(target: string, options: SwitchOptions = {
       );
   if (confirmation.status === "missing") {
     throw new HerdrError(
-      `Could not confirm a new client of “${target}”`,
+      `Could not confirm a new client of “${targetTitle}”`,
       "switch_unconfirmed",
-      `The terminal ran the command, but no client of “${target}” appeared where it was launched, so “${previous}” was left as it was.`,
+      `The terminal ran the command, but no client of “${targetTitle}” appeared where it was launched, so “${previousTitle}” was left as it was.`,
       target,
     );
   }
@@ -167,7 +173,7 @@ export async function switchToSession(target: string, options: SwitchOptions = {
       outcome: "attached",
       previous,
       detached: 0,
-      skipped: `no client of “${previous}” is open in a terminal pane`,
+      skipped: `no client of “${previousTitle}” is open in a terminal pane`,
     };
   }
   if (location.status === "unavailable")
@@ -188,7 +194,7 @@ export async function switchToSession(target: string, options: SwitchOptions = {
       outcome: "attached",
       previous,
       detached: 0,
-      skipped: `the new client opened in another window; ${untouched} client${untouched === 1 ? "" : "s"} of “${previous}” left attached`,
+      skipped: `the new client opened in another window; ${untouched} client${untouched === 1 ? "" : "s"} of “${previousTitle}” left attached`,
     };
   }
 
@@ -208,7 +214,7 @@ export async function switchToSession(target: string, options: SwitchOptions = {
       outcome: "attached",
       previous,
       detached,
-      skipped: `${failed} client${failed === 1 ? "" : "s"} of “${previous}” could not be detached`,
+      skipped: `${failed} client${failed === 1 ? "" : "s"} of “${previousTitle}” could not be detached`,
     };
   }
   return {

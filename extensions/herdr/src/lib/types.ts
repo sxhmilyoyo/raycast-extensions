@@ -97,10 +97,25 @@ export interface HerdrSession {
   socket_path: string;
 }
 
+/**
+ * A Herdr saved SSH machine, as `machine list --json` reports it. `selected` is
+ * the choice shown inside Herdr's own client, not the Selected Session.
+ */
+export interface Machine {
+  id: string;
+  label: string;
+  target: string;
+  session: string;
+  enabled: boolean;
+  selected: boolean;
+}
+
 export interface PromptHistoryItem {
   id: string;
   text: string;
   target: string;
+  /** The Machine whose Session the prompt went to. Unset means the Local Host, as every entry written before Machines was. */
+  machine?: string;
   agent: string;
   kind?: string;
   createdAt: string;

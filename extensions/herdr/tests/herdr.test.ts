@@ -12,6 +12,8 @@ import {
   runHerdr,
   sessionPresence,
 } from "../src/lib/herdr";
+import { setSelectedSession } from "../src/lib/session-selection";
+import { remote } from "./helpers/machines";
 import { storage } from "./helpers/raycast-api";
 
 vi.mock("node:fs/promises", () => ({ access: vi.fn() }));
@@ -62,10 +64,10 @@ function executedArgs(): unknown {
   return vi.mocked(execFile).mock.calls[0][1];
 }
 
-function mockExecFileFailure(stderr: string) {
+function mockExecFileFailure(stderr: string, code = 1) {
   vi.mocked(execFile).mockImplementation(((...callArgs: unknown[]) => {
     const callback = callArgs.at(-1) as (error: Error | null, stdout: string, stderr: string) => void;
-    callback(Object.assign(new Error("Command failed"), { code: 1 }), "", stderr);
+    callback(Object.assign(new Error("Command failed"), { code }), "", stderr);
     return {};
   }) as never);
 }
@@ -94,7 +96,7 @@ describe("runHerdr", () => {
     preferences.sessionName = "work";
     mockExecFileSuccess();
 
-    await runHerdr(["session", "list", "--json"], { session: "" });
+    await runHerdr(["session", "list", "--json"], { ref: { name: "" } });
     expect(executedArgs()).toEqual(["session", "list", "--json"]);
   });
 
@@ -116,7 +118,7 @@ describe("runHerdr", () => {
 
     const failure = await runHerdr(["api", "snapshot"]).catch((error: unknown) => error);
     expect(failure).toBeInstanceOf(HerdrError);
-    expect(failure).toMatchObject({ code: "session_not_running", session: "tmp-b" });
+    expect(failure).toMatchObject({ code: "session_not_running", session: { name: "tmp-b" } });
     expect((failure as HerdrError).message).toContain("tmp-b");
   });
 
@@ -131,7 +133,7 @@ describe("runHerdr", () => {
 
     const failure = await runHerdr(["api", "snapshot"]).catch((error: unknown) => error);
     expect(failure).toBeInstanceOf(HerdrError);
-    expect(failure).toMatchObject({ code: "session_not_running", session: "tmp-b" });
+    expect(failure).toMatchObject({ code: "session_not_running", session: { name: "tmp-b" } });
   });
 
   // Commands that span sessions carry no session, so the same envelope is an
@@ -139,7 +141,7 @@ describe("runHerdr", () => {
   it("does not call a sessionless command's server_not_running a Stopped session", async () => {
     mockExecFileFailure('{"id":"cli:session:stop","error":{"code":"server_not_running","message":"not running"}}\n');
 
-    const failure = await runHerdr(["session", "stop", "tmp-b", "--json"], { session: "" }).catch(
+    const failure = await runHerdr(["session", "stop", "tmp-b", "--json"], { ref: { name: "" } }).catch(
       (error: unknown) => error,
     );
     expect(failure).toMatchObject({ code: "server_not_running" });
@@ -172,6 +174,40 @@ describe("runHerdr", () => {
   });
 });
 
+// A Machine's Session is reached through Herdr's `--machine <id>` prefix, which
+// routes the command over Herdr's own SSH bridge. The prefix stands in for
+// --session: naming the remote Session locally would read a Local Host Session
+// of that name.
+describe("runHerdr for a Machine", () => {
+  it("prefixes the command with --machine and the Machine's id, never --session", async () => {
+    await setSelectedSession(remote);
+    mockExecFileSuccess();
+
+    await runHerdr(["api", "snapshot"]);
+    expect(executedArgs()).toEqual(["--machine", remote.machine, "api", "snapshot"]);
+  });
+
+  // Herdr 0.9.0 does not know the prefix and rejects it before anything runs.
+  // That is an out-of-date Herdr, not a failed read, and it never falls back to
+  // a local read.
+  it("reports an out-of-date Herdr when the prefix is rejected", async () => {
+    await setSelectedSession(remote);
+    mockExecFileFailure("unknown option: --machine\nrun 'herdr --help' for usage\n", 2);
+
+    const failure = await runHerdr(["api", "snapshot"]).catch((error: unknown) => error);
+    expect(failure).toMatchObject({ code: "machine_prefix_unsupported", session: remote });
+    expect(execFile).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports a Stopped remote Session from the server_not_running envelope", async () => {
+    await setSelectedSession(remote);
+    mockExecFileFailure('{"id":"cli:api:snapshot","error":{"code":"server_not_running","message":"not running"}}\n');
+
+    const failure = await runHerdr(["api", "snapshot"]).catch((error: unknown) => error);
+    expect(failure).toMatchObject({ code: "session_not_running", session: remote });
+  });
+});
+
 describe("getSnapshot", () => {
   it("reads the snapshot of an explicit session", async () => {
     storage.set("selectedSession", "tmp-b");
@@ -181,7 +217,7 @@ describe("getSnapshot", () => {
       return {};
     }) as never);
 
-    await getSnapshot(undefined, "tmp-a");
+    await getSnapshot(undefined, { name: "tmp-a" });
     expect(executedArgs()).toEqual(["--session", "tmp-a", "api", "snapshot"]);
   });
 });

@@ -2,7 +2,9 @@ import { execFile, spawn } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { getSelectedSession } from "../src/lib/session-selection";
 import { switchToSession, type Kill } from "../src/lib/session-switch";
+import { cddMeshclaw, remote } from "./helpers/machines";
 import { storage } from "./helpers/raycast-api";
 
 vi.mock("node:child_process", () => ({ execFile: vi.fn(), spawn: vi.fn() }));
@@ -47,6 +49,8 @@ interface Fixture {
   lookupFailsAfterSpawn?: boolean;
   /** 1-based pgrep calls that fail with a timeout, to make one lookup transiently unavailable. */
   failPgrepCalls?: number[];
+  /** What `herdr machine list --json` reports. */
+  machines?: object[];
 }
 
 const events: string[] = [];
@@ -112,6 +116,10 @@ function mockSystem(fixture: Fixture) {
       if (args[1] === "activate-pane" && fixture.activateFails) return callback(new Error("activate failed"), "", "");
       return respond("");
     }
+    if (path === binary && args[0] === "machine" && args[1] === "list") {
+      events.push("machine list");
+      return respond(JSON.stringify(fixture.machines ?? []));
+    }
     if (path === "/usr/bin/open") {
       events.push("open");
       if (fixture.spawnResult instanceof Error) return callback(fixture.spawnResult, "", "");
@@ -164,10 +172,10 @@ describe("switchToSession", () => {
   it("spawns the new client into the previous client's window before detaching it", async () => {
     mockSystem({ processes: [previousClient], panes: [previousPane], spawned: spawnedTarget });
 
-    const result = await switchToSession("tmp-b", switchOptions(kill));
+    const result = await switchToSession({ name: "tmp-b" }, switchOptions(kill));
 
-    expect(result).toEqual({ outcome: "attached", previous: "tmp-a", detached: 1 });
-    expect(storage.get("selectedSession")).toBe("tmp-b");
+    expect(result).toEqual({ outcome: "attached", previous: { name: "tmp-a" }, detached: 1 });
+    await expect(getSelectedSession()).resolves.toEqual({ name: "tmp-b" });
     expect(kill).toHaveBeenCalledWith(101, "SIGTERM");
     const spawnIndex = events.findIndex((event) => event.startsWith("wezterm spawn"));
     expect(events[spawnIndex]).toBe(`wezterm spawn --window-id 3 -- ${binary} session attach tmp-b`);
@@ -182,10 +190,10 @@ describe("switchToSession", () => {
       panes: [previousPane, { window_id: 3, pane_id: 6, tty_name: "/dev/ttys002" }],
     });
 
-    const result = await switchToSession("tmp-b", switchOptions(kill));
+    const result = await switchToSession({ name: "tmp-b" }, switchOptions(kill));
 
-    expect(result).toEqual({ outcome: "revealed", previous: "tmp-a", detached: 0 });
-    expect(storage.get("selectedSession")).toBe("tmp-b");
+    expect(result).toEqual({ outcome: "revealed", previous: { name: "tmp-a" }, detached: 0 });
+    await expect(getSelectedSession()).resolves.toEqual({ name: "tmp-b" });
     expect(kill).not.toHaveBeenCalled();
     expect(events).toContain("wezterm activate-pane");
     expect(events.some((event) => event.startsWith("wezterm spawn"))).toBe(false);
@@ -198,9 +206,9 @@ describe("switchToSession", () => {
       spawned: spawnedTarget,
     });
 
-    const result = await switchToSession("tmp-b", switchOptions(kill));
+    const result = await switchToSession({ name: "tmp-b" }, switchOptions(kill));
 
-    expect(result).toMatchObject({ outcome: "attached", previous: "tmp-a", detached: 0 });
+    expect(result).toMatchObject({ outcome: "attached", previous: { name: "tmp-a" }, detached: 0 });
     expect(result.skipped).toContain("tmp-a");
     expect(kill).not.toHaveBeenCalled();
     expect(events).toContain(`wezterm spawn --window-id 9 -- ${binary} session attach tmp-b`);
@@ -219,7 +227,7 @@ describe("switchToSession", () => {
       spawned: spawnedTarget,
     });
 
-    const result = await switchToSession("tmp-b", switchOptions(kill));
+    const result = await switchToSession({ name: "tmp-b" }, switchOptions(kill));
 
     expect(result).toMatchObject({ outcome: "attached", detached: 0 });
     expect(kill).not.toHaveBeenCalled();
@@ -230,9 +238,9 @@ describe("switchToSession", () => {
   it("keeps the previous selection when the new client cannot be launched", async () => {
     mockSystem({ processes: [previousClient], panes: [previousPane], spawnResult: new Error("spawn failed") });
 
-    await expect(switchToSession("tmp-b", switchOptions(kill))).rejects.toThrow();
+    await expect(switchToSession({ name: "tmp-b" }, switchOptions(kill))).rejects.toThrow();
     expect(kill).not.toHaveBeenCalled();
-    expect(storage.get("selectedSession")).toBe("tmp-a");
+    await expect(getSelectedSession()).resolves.toEqual({ name: "tmp-a" });
   });
 
   // Regression: a `found` location whose signals all failed reported zero
@@ -243,7 +251,7 @@ describe("switchToSession", () => {
       throw Object.assign(new Error("no such process"), { code: "ESRCH" });
     });
 
-    const result = await switchToSession("tmp-b", switchOptions(failing));
+    const result = await switchToSession({ name: "tmp-b" }, switchOptions(failing));
 
     expect(result).toMatchObject({ outcome: "attached", detached: 0 });
     expect(result.skipped).toBeTruthy();
@@ -254,9 +262,9 @@ describe("switchToSession", () => {
     storage.set("selectedSession", "tmp-b");
     mockSystem({ processes: [], panes: [previousPane], spawned: spawnedTarget });
 
-    const result = await switchToSession("tmp-b", switchOptions(kill));
+    const result = await switchToSession({ name: "tmp-b" }, switchOptions(kill));
 
-    expect(result).toMatchObject({ outcome: "attached", previous: "tmp-b", detached: 0 });
+    expect(result).toMatchObject({ outcome: "attached", previous: { name: "tmp-b" }, detached: 0 });
     expect(kill).not.toHaveBeenCalled();
     // Regression: this branch claimed no client of the session was open in a
     // terminal pane without ever looking.
@@ -273,7 +281,7 @@ describe("switchToSession", () => {
     };
     mockSystem({ processes: [previousClient], panes: [], spawned: spawnedTarget });
 
-    const result = await switchToSession("tmp-b", switchOptions(kill));
+    const result = await switchToSession({ name: "tmp-b" }, switchOptions(kill));
 
     expect(result).toMatchObject({ outcome: "attached", detached: 0 });
     expect(result.skipped).toContain("kitty");
@@ -289,18 +297,18 @@ describe("switchToSession confirmation", () => {
   it("leaves the previous clients and the selection alone when no client appears", async () => {
     mockSystem({ processes: [previousClient], panes: [previousPane] });
 
-    await expect(switchToSession("tmp-b", switchOptions(kill))).rejects.toThrow(/tmp-b/);
+    await expect(switchToSession({ name: "tmp-b" }, switchOptions(kill))).rejects.toThrow(/tmp-b/);
     expect(kill).not.toHaveBeenCalled();
-    expect(storage.get("selectedSession")).toBe("tmp-a");
+    await expect(getSelectedSession()).resolves.toEqual({ name: "tmp-a" });
   });
 
   it("selects and detaches once the client is discoverable", async () => {
     mockSystem({ processes: [previousClient], panes: [previousPane], spawned: spawnedTarget });
 
-    const result = await switchToSession("tmp-b", switchOptions(kill));
+    const result = await switchToSession({ name: "tmp-b" }, switchOptions(kill));
 
     expect(result).toMatchObject({ outcome: "attached", detached: 1 });
-    expect(storage.get("selectedSession")).toBe("tmp-b");
+    await expect(getSelectedSession()).resolves.toEqual({ name: "tmp-b" });
     const spawnIndex = events.findIndex((event) => event.startsWith("wezterm spawn"));
     // The confirmation lookup runs between the spawn and the signal.
     expect(events.lastIndexOf("ps")).toBeGreaterThan(spawnIndex);
@@ -319,7 +327,7 @@ describe("switchToSession detach scope", () => {
       spawned: spawnedTarget,
     });
 
-    const result = await switchToSession("tmp-b", switchOptions(kill));
+    const result = await switchToSession({ name: "tmp-b" }, switchOptions(kill));
 
     expect(result).toMatchObject({ outcome: "attached", detached: 1 });
     expect(kill).toHaveBeenCalledTimes(1);
@@ -335,7 +343,7 @@ describe("switchToSession detach scope", () => {
       spawned: spawnedTarget,
     });
 
-    const result = await switchToSession("tmp-b", switchOptions(kill));
+    const result = await switchToSession({ name: "tmp-b" }, switchOptions(kill));
 
     expect(result).toMatchObject({ outcome: "attached", detached: 2 });
     expect(result.skipped).toBeUndefined();
@@ -358,9 +366,9 @@ describe("switchToSession replacement identity", () => {
       activateFails: true,
     });
 
-    await expect(switchToSession("tmp-b", switchOptions(kill))).rejects.toThrow(/tmp-b/);
+    await expect(switchToSession({ name: "tmp-b" }, switchOptions(kill))).rejects.toThrow(/tmp-b/);
     expect(kill).not.toHaveBeenCalled();
-    expect(storage.get("selectedSession")).toBe("tmp-a");
+    await expect(getSelectedSession()).resolves.toEqual({ name: "tmp-a" });
   });
 
   // When the spawn reports no pane, as on the `open` fallback or a terminal other
@@ -375,11 +383,11 @@ describe("switchToSession replacement identity", () => {
       spawned: { processes: [replacement], panes: [{ window_id: 3, pane_id: 78, tty_name: "/dev/ttys091" }] },
     });
 
-    const result = await switchToSession("tmp-b", switchOptions(kill));
+    const result = await switchToSession({ name: "tmp-b" }, switchOptions(kill));
 
     expect(result).toMatchObject({ outcome: "attached", detached: 1 });
     expect(kill).toHaveBeenCalledWith(101, "SIGTERM");
-    expect(storage.get("selectedSession")).toBe("tmp-b");
+    await expect(getSelectedSession()).resolves.toEqual({ name: "tmp-b" });
   });
 
   // With nothing to detach, an existing Client of the target is a fine reason to
@@ -387,10 +395,10 @@ describe("switchToSession replacement identity", () => {
   it("still selects the target when there is nothing to detach", async () => {
     mockSystem({ processes: [strayTarget], panes: [strayPane], activateFails: true });
 
-    const result = await switchToSession("tmp-b", switchOptions(kill));
+    const result = await switchToSession({ name: "tmp-b" }, switchOptions(kill));
 
     expect(result).toMatchObject({ outcome: "attached", detached: 0 });
-    expect(storage.get("selectedSession")).toBe("tmp-b");
+    await expect(getSelectedSession()).resolves.toEqual({ name: "tmp-b" });
     expect(kill).not.toHaveBeenCalled();
   });
 });
@@ -408,9 +416,9 @@ describe("switchToSession with an unavailable confirmation", () => {
       lookupFailsAfterSpawn: true,
     });
 
-    await expect(switchToSession("tmp-b", switchOptions(kill))).rejects.toThrow(/confirm/);
+    await expect(switchToSession({ name: "tmp-b" }, switchOptions(kill))).rejects.toThrow(/confirm/);
     expect(kill).not.toHaveBeenCalled();
-    expect(storage.get("selectedSession")).toBe("tmp-a");
+    await expect(getSelectedSession()).resolves.toEqual({ name: "tmp-a" });
   });
 });
 
@@ -431,7 +439,7 @@ describe("switchToSession confirmation by spawned pane", () => {
       spawned: { processes: [elsewhere], panes: [{ window_id: 4, pane_id: 93, tty_name: "/dev/ttys093" }] },
     });
 
-    await expect(switchToSession("tmp-b", switchOptions(kill))).rejects.toThrow(/tmp-b/);
+    await expect(switchToSession({ name: "tmp-b" }, switchOptions(kill))).rejects.toThrow(/tmp-b/);
     expect(kill).not.toHaveBeenCalled();
   });
 
@@ -444,7 +452,7 @@ describe("switchToSession confirmation by spawned pane", () => {
       spawned: { processes: [replacement], panes: [{ window_id: 3, pane_id: 77, tty_name: "/dev/ttys091" }] },
     });
 
-    const result = await switchToSession("tmp-b", switchOptions(kill));
+    const result = await switchToSession({ name: "tmp-b" }, switchOptions(kill));
 
     expect(result).toMatchObject({ outcome: "attached", detached: 1 });
     expect(kill).toHaveBeenCalledWith(101, "SIGTERM");
@@ -465,12 +473,12 @@ describe("switchToSession detach follows the replacement's window", () => {
       spawned: { processes: [replacement], panes: [{ window_id: 8, pane_id: 70, tty_name: "/dev/ttys091" }] },
     });
 
-    const result = await switchToSession("tmp-b", switchOptions(kill));
+    const result = await switchToSession({ name: "tmp-b" }, switchOptions(kill));
 
     expect(result).toMatchObject({ outcome: "attached", detached: 0 });
     expect(result.skipped).toMatch(/another window/);
     expect(kill).not.toHaveBeenCalled();
-    expect(storage.get("selectedSession")).toBe("tmp-b");
+    await expect(getSelectedSession()).resolves.toEqual({ name: "tmp-b" });
   });
 });
 
@@ -491,9 +499,9 @@ describe("switchToSession with an unknown pre-launch client set", () => {
       spawnResult: "",
     });
 
-    await expect(switchToSession("tmp-b", switchOptions(kill))).rejects.toThrow(/confirm/);
+    await expect(switchToSession({ name: "tmp-b" }, switchOptions(kill))).rejects.toThrow(/confirm/);
     expect(kill).not.toHaveBeenCalled();
-    expect(storage.get("selectedSession")).toBe("tmp-a");
+    await expect(getSelectedSession()).resolves.toEqual({ name: "tmp-a" });
   });
 
   it("still confirms by the spawned pane when the pre-launch lookup failed", async () => {
@@ -505,7 +513,7 @@ describe("switchToSession with an unknown pre-launch client set", () => {
       spawned: spawnedTarget,
     });
 
-    const result = await switchToSession("tmp-b", switchOptions(kill));
+    const result = await switchToSession({ name: "tmp-b" }, switchOptions(kill));
 
     expect(result).toMatchObject({ outcome: "attached", detached: 1 });
     expect(kill).toHaveBeenCalledWith(101, "SIGTERM");
@@ -520,12 +528,29 @@ describe("switchToSession with a custom terminal launcher", () => {
     preferences.customTerminalLauncher = "term -e {herdr} {args}";
     mockSystem({ processes: [previousClient], panes: [previousPane] });
 
-    const result = await switchToSession("tmp-b", switchOptions(kill));
+    const result = await switchToSession({ name: "tmp-b" }, switchOptions(kill));
 
     expect(result).toMatchObject({ outcome: "attached", detached: 0 });
     expect(result.skipped).toMatch(/custom/i);
     expect(kill).not.toHaveBeenCalled();
-    expect(storage.get("selectedSession")).toBe("tmp-b");
+    await expect(getSelectedSession()).resolves.toEqual({ name: "tmp-b" });
     expect(events.some((event) => event.startsWith("wezterm spawn"))).toBe(false);
+  });
+});
+
+// A Machine's Clients are not recognised in the process table yet, so a switch
+// to one is Remote Attach plus a selection: nothing can be confirmed, so
+// nothing is detached, and the toast says why.
+describe("switchToSession to a Machine", () => {
+  it("attaches by Remote Attach, selects the Machine, and detaches nothing", async () => {
+    mockSystem({ processes: [previousClient], panes: [previousPane], machines: [cddMeshclaw] });
+
+    const result = await switchToSession(remote, switchOptions(kill));
+
+    expect(result).toMatchObject({ outcome: "attached", previous: { name: "tmp-a" }, detached: 0 });
+    expect(result.skipped).toMatch(/meshclaw/);
+    expect(kill).not.toHaveBeenCalled();
+    expect(events).toContain(`wezterm spawn --window-id 3 -- ${binary} --remote clouddesk-arm --session meshclaw`);
+    await expect(getSelectedSession()).resolves.toEqual(remote);
   });
 });

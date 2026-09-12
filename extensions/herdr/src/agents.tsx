@@ -4,6 +4,7 @@ import { AgentActions } from "./components/resource-actions";
 import { StartAgentForm } from "./components/start-agent-form";
 import { useHerdrSnapshot } from "./hooks/use-herdr-snapshot";
 import { agentIcon, agentName } from "./lib/agent-appearance";
+import { formatSessionRef } from "./lib/session-ref";
 import type { AgentStatus } from "./lib/types";
 import { ErrorView, ManageSessionsAction, shortcuts, statusIcon, statusTitle } from "./lib/ui";
 
@@ -20,8 +21,8 @@ export default function Command() {
     <List
       isLoading={snapshot.isLoading}
       searchBarPlaceholder={
-        snapshot.session
-          ? `Search agents, names, projects, paths in ${snapshot.session}…`
+        snapshot.ref
+          ? `Search agents, names, projects, paths in ${formatSessionRef(snapshot.ref)}…`
           : "Search agents, names, projects, paths…"
       }
       actions={

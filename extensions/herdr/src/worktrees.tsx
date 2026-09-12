@@ -3,7 +3,7 @@ import { CreateWorktreeForm } from "./components/create-worktree-form";
 import { useHerdrSnapshot } from "./hooks/use-herdr-snapshot";
 import { focusResource, runHerdr } from "./lib/herdr";
 import { revealFocusedHerdr } from "./lib/terminal";
-import { ErrorView, runAction, shortcuts } from "./lib/ui";
+import { ErrorView, ShowLocalPathInFinderAction, runAction, shortcuts } from "./lib/ui";
 
 export default function Command() {
   const snapshot = useHerdrSnapshot();
@@ -90,7 +90,7 @@ export default function Command() {
                 target={<CreateWorktreeForm initialWorkspaceId={workspace.workspace_id} onDone={snapshot.revalidate} />}
               />
               {workspace.worktree?.checkout_path ? (
-                <Action.ShowInFinder path={workspace.worktree.checkout_path} shortcut={shortcuts.copyPath} />
+                <ShowLocalPathInFinderAction path={workspace.worktree.checkout_path} shortcut={shortcuts.copyPath} />
               ) : null}
               {workspace.worktree?.repo_root ? (
                 <Action.CopyToClipboard

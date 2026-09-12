@@ -5,6 +5,7 @@ import {
   Color,
   Detail,
   Icon,
+  type Keyboard,
   LaunchType,
   Toast,
   closeMainWindow,
@@ -13,9 +14,12 @@ import {
   showToast,
 } from "@raycast/api";
 import { useCachedPromise } from "@raycast/utils";
-import { formatHerdrError, getSessions, sessionPresence, stoppedSessionOf } from "./herdr";
+import { formatHerdrError, getSessions, stoppedSessionOf } from "./herdr";
+import { showLocalPathInFinder } from "./host-paths";
+import { listMachines, sessionRefPresence } from "./machines";
+import { formatSessionRef, type SessionRef } from "./session-ref";
 import { shortcuts } from "./shortcuts";
-import { launchHerdrInTerminal, type LaunchResult } from "./terminal";
+import { attachInTerminal, type LaunchResult } from "./terminal";
 import type { AgentStatus, TabInfo } from "./types";
 export { shortcuts } from "./shortcuts";
 
@@ -94,6 +98,39 @@ export async function runAction(
 }
 
 /**
+ * Show in Finder, for a path that belongs to a Session's Host: `session` when
+ * the caller knows which Session that is, else the Selected Session's. Stands
+ * in for `Action.ShowInFinder`, which would hand a Remote Host's path to the
+ * local Finder, and closes the main window on success as the built-in does.
+ */
+export function ShowLocalPathInFinderAction({
+  path,
+  session,
+  shortcut,
+}: {
+  path: string;
+  session?: SessionRef;
+  shortcut?: Keyboard.Shortcut;
+}) {
+  return (
+    <Action
+      title="Show in Finder"
+      icon={Icon.Finder}
+      shortcut={shortcut}
+      onAction={async () => {
+        try {
+          await showLocalPathInFinder(path, session);
+          await closeMainWindow();
+        } catch (error) {
+          const formatted = formatHerdrError(error);
+          await showToast({ style: Toast.Style.Failure, title: formatted.title, message: formatted.message });
+        }
+      }}
+    />
+  );
+}
+
+/**
  * Opens Manage Sessions, the one picker for the Selected Session. Selecting or
  * switching happens there, so this action is never titled Switch.
  */
@@ -111,20 +148,27 @@ export function ManageSessionsAction({ title = "Manage Sessions…" }: { title?:
 // Reads never start a session, so a Stopped Selected Session is shown as such;
 // attaching through the terminal is the only way to start it from here. Herdr
 // reports a session that does not exist the same way, and `herdr --session`
-// would create it, so the start action appears only once the session list has
-// confirmed the name; while the list loads, or if it fails, there is no start.
-function SessionStoppedView({ session, onRetry }: { session: string; onRetry?: () => void }) {
-  const sessions = useCachedPromise(getSessions, [], { keepPreviousData: true });
-  const presence = sessionPresence(sessions, session);
+// would create it, so the start action appears only once a list has confirmed
+// the Session: `session list` for the Local Host, and the machine list for a
+// Machine's Session, which exists for as long as its Machine is saved. While
+// the list loads, or if it fails, there is no start.
+function SessionStoppedView({ session, onRetry }: { session: SessionRef; onRetry?: () => void }) {
+  const sessions = useCachedPromise(getSessions, [], { execute: !session.machine, keepPreviousData: true });
+  const machines = useCachedPromise(listMachines, [], { execute: Boolean(session.machine), keepPreviousData: true });
+  const presence = sessionRefPresence(session, sessions, machines);
+  const listError = session.machine ? machines.error : sessions.error;
+  const title = formatSessionRef(session, machines.data);
   const markdown =
     presence === "missing"
-      ? `# Session “${session}” was not found\n\nIt may have been deleted, or the Default Session preference may be misspelled. Choose another session for Raycast to control.`
-      : presence === "unknown" && sessions.error
-        ? `# Session “${session}” is stopped\n\nThe session list could not be read, so it cannot be started from here. Open Manage Sessions to start it or choose another session.`
-        : `# Session “${session}” is stopped\n\nAttach to start it in your terminal, or choose another session for Raycast to control.`;
+      ? session.machine
+        ? `# Session “${title}” was not found\n\nIts Machine is no longer saved in Herdr. Choose another session for Raycast to control.`
+        : `# Session “${title}” was not found\n\nIt may have been deleted, or the Default Session preference may be misspelled. Choose another session for Raycast to control.`
+      : presence === "unknown" && listError
+        ? `# Session “${title}” is stopped\n\nThe ${session.machine ? "machine" : "session"} list could not be read, so it cannot be started from here. Open Manage Sessions to start it or choose another session.`
+        : `# Session “${title}” is stopped\n\nAttach to start it in your terminal, or choose another session for Raycast to control.`;
   return (
     <Detail
-      isLoading={sessions.isLoading}
+      isLoading={sessions.isLoading || machines.isLoading}
       markdown={markdown}
       actions={
         <ActionPanel>
@@ -133,11 +177,9 @@ function SessionStoppedView({ session, onRetry }: { session: string; onRetry?: (
               title="Start and Attach in Terminal"
               icon={Icon.Terminal}
               onAction={async () => {
-                const succeeded = await runAction(
-                  "Starting session",
-                  () => launchHerdrInTerminal(["session", "attach", session], { includeSession: false }),
-                  { success: "Terminal Opened" },
-                );
+                const succeeded = await runAction("Starting session", () => attachInTerminal(session), {
+                  success: "Terminal Opened",
+                });
                 if (succeeded) await closeMainWindow({ clearRootSearch: true });
               }}
             />
