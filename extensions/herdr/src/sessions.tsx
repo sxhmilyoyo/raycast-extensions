@@ -9,12 +9,11 @@ import { clearSelectedSessionIf, setSelectedSession } from "./lib/session-select
 import { switchToSession, type SwitchResult } from "./lib/session-switch";
 import { attachInTerminal } from "./lib/terminal";
 import type { Machine } from "./lib/types";
-import { ErrorView, ShowLocalPathInFinderAction, runAction, shortcuts } from "./lib/ui";
+import { CONNECTING_MACHINES_GUIDE, ErrorView, ShowLocalPathInFinderAction, runAction, shortcuts } from "./lib/ui";
 
 // Adding a Machine is Herdr's interactive setup, which asks before installing or
 // replacing anything on the Remote Host, so Raycast hands the user the command.
 const ADD_MACHINE_COMMAND = "herdr machine add <ssh-target> --label <label> --remote-session <session>";
-const CONNECTING_MACHINES_GUIDE = "https://herdr.dev/docs/connecting-machines/";
 
 function switchMessage(result: SwitchResult, machines: Machine[] | undefined): string {
   if (result.outcome === "revealed") return "Revealed its existing client";
@@ -82,7 +81,8 @@ export default function Command() {
   }
 
   // Manage Sessions lists the Local Host, so Stop and Delete name a Local Host
-  // Session outright; a Machine's Session is never stopped or deleted from here.
+  // Session outright; a Machine's Session is stopped through its bridge below
+  // and never deleted from here.
   async function stop(name: string) {
     if (
       !(await confirmAlert({
@@ -121,6 +121,24 @@ export default function Command() {
         success: "Session Deleted",
         onSuccess: refresh,
       },
+    );
+  }
+
+  // Herdr's `server stop`, routed to the Machine by `--machine <id>`: the server
+  // on its Host exits with every pane process, and only an attach restarts it.
+  async function stopMachineSession(machine: Machine) {
+    if (
+      !(await confirmAlert({
+        title: `Stop session “${machine.session}” on “${machine.label}”?`,
+        message: `Every workspace, pane, agent, and running process in this session will stop, and Herdr's server on ${machine.target} exits with them.`,
+        primaryAction: { title: "Stop Session", style: Alert.ActionStyle.Destructive },
+      }))
+    )
+      return;
+    await runAction(
+      "Stopping session",
+      () => runHerdr(["server", "stop"], { ref: machineSessionRef(machine) }).then(() => undefined),
+      { success: "Session Stopped" },
     );
   }
 
@@ -344,6 +362,12 @@ export default function Command() {
                       icon={Icon.Checkmark}
                       shortcut={shortcuts.selectSession}
                       onAction={() => select(ref)}
+                    />
+                    <Action
+                      title="Stop Session"
+                      icon={Icon.Stop}
+                      style={Action.Style.Destructive}
+                      onAction={() => stopMachineSession(machine)}
                     />
                     <ActionPanel.Section title="Machine">
                       <Action

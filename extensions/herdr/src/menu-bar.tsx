@@ -15,6 +15,7 @@ import {
   formatHerdrError,
   getAgentTarget,
   getSessions,
+  machineProblemOf,
   stoppedSessionOf,
   updateRequiredFor,
   type SessionListState,
@@ -102,6 +103,16 @@ function describeProblem(error: unknown, sessions: SessionListState, machines: M
       opensManageSessions: presence !== "listed",
     };
   }
+  const machineProblem = machineProblemOf(error);
+  if (machineProblem) {
+    const title = formatSessionRef(machineProblem, machines.data);
+    return {
+      tooltip: `Herdr · ${title} is unavailable`,
+      title: `Session “${title}” Is Unavailable — Manage Sessions…`,
+      icon: Icon.Network,
+      opensManageSessions: true,
+    };
+  }
   return {
     tooltip: "Herdr is unavailable",
     title: "Herdr Unavailable — Open Herdr",
@@ -152,16 +163,17 @@ export default function Command() {
   const leadingCount = leadingStatus ? groups.get(leadingStatus)?.length : undefined;
   const stoppedSession = stoppedSessionOf(snapshot.error);
   const updateRequired = updateRequiredFor(snapshot.error);
-  // A list is consulted only while the Snapshot reads as Stopped or as needing
-  // an update, the menu bar's one exception to its no-extra-subprocess rule
-  // (ADR-0002): `session list` for a Local Host Session, the machine list for a
-  // Machine's Session and its label.
+  const machineProblem = machineProblemOf(snapshot.error);
+  // A list is consulted only while the Snapshot reads as Stopped, as needing an
+  // update, or as a Machine problem, the menu bar's one exception to its
+  // no-extra-subprocess rule (ADR-0002): `session list` for a Local Host
+  // Session, the machine list for a Machine's Session and its label.
   const sessions = useCachedPromise(getSessions, [], {
     execute: stoppedSession !== undefined && !stoppedSession.machine,
     keepPreviousData: true,
   });
   const machines = useCachedPromise(listMachines, [], {
-    execute: Boolean(stoppedSession?.machine) || updateRequired !== undefined,
+    execute: Boolean(stoppedSession?.machine) || updateRequired !== undefined || machineProblem !== undefined,
     keepPreviousData: true,
   });
   const problem = describeProblem(snapshot.error, sessions, machines);

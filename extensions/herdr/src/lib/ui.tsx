@@ -15,7 +15,14 @@ import {
 } from "@raycast/api";
 import { useCachedPromise } from "@raycast/utils";
 import { useSessionTitle } from "../hooks/use-session-title";
-import { formatHerdrError, getSessions, stoppedSessionOf, updateRequiredFor } from "./herdr";
+import {
+  HerdrError,
+  formatHerdrError,
+  getSessions,
+  machineProblemOf,
+  stoppedSessionOf,
+  updateRequiredFor,
+} from "./herdr";
 import { showLocalPathInFinder } from "./host-paths";
 import { listMachines, sessionRefPresence } from "./machines";
 import { formatSessionRef, type SessionRef } from "./session-ref";
@@ -23,6 +30,8 @@ import { shortcuts } from "./shortcuts";
 import { attachInTerminal, type LaunchResult } from "./terminal";
 import type { AgentStatus, TabInfo } from "./types";
 export { shortcuts } from "./shortcuts";
+
+export const CONNECTING_MACHINES_GUIDE = "https://herdr.dev/docs/connecting-machines/";
 
 // Herdr defaults a tab's label to its number, which identifies nothing.
 export function tabLabel(tab?: TabInfo): string | undefined {
@@ -226,11 +235,59 @@ function HerdrUpdateRequiredView({ session, onRetry }: { session: SessionRef; on
   );
 }
 
+// A Machine's Session that cannot be read right now: the bridge could not reach
+// the Machine, or the Machine is disabled or no longer saved. Herdr's own text
+// says what failed. The interactive attach completes any SSH setup the
+// noninteractive bridge cannot, such as a new host key or an expired login.
+function MachineProblemView({
+  session,
+  error,
+  onRetry,
+}: {
+  session: SessionRef;
+  error: unknown;
+  onRetry?: () => void;
+}) {
+  const title = useSessionTitle(session) ?? formatSessionRef(session);
+  const code = error instanceof HerdrError ? error.code : undefined;
+  const heading =
+    code === "machine_disabled"
+      ? `The Machine of “${title}” is disabled`
+      : code === "machine_unknown"
+        ? `The Machine of “${title}” is no longer saved in Herdr`
+        : `“${title}” is unreachable`;
+  const hint =
+    code === "machine_unavailable"
+      ? `\n\nTry again, or attach to “${title}” in your terminal to complete the Machine's SSH setup. Choose another session for Raycast to control meanwhile.`
+      : "";
+  const markdown = `# ${heading}\n\n${formatHerdrError(error).message ?? ""}${hint}`;
+  return (
+    <Detail
+      markdown={markdown}
+      actions={
+        <ActionPanel>
+          {onRetry ? (
+            <Action title="Try Again" icon={Icon.ArrowClockwise} shortcut={shortcuts.refresh} onAction={onRetry} />
+          ) : null}
+          {code === "machine_unknown" ? null : (
+            <AttachSessionAction session={session} title="Attach in Terminal" progress="Opening session" />
+          )}
+          <ManageSessionsAction title="Choose Another Session" />
+          <Action.OpenInBrowser title="Open Connecting Machines Guide" url={CONNECTING_MACHINES_GUIDE} />
+          <Action title="Open Extension Preferences…" icon={Icon.Gear} onAction={openExtensionPreferences} />
+        </ActionPanel>
+      }
+    />
+  );
+}
+
 export function ErrorView({ error, onRetry }: { error: unknown; onRetry?: () => void }) {
   const updateRequired = updateRequiredFor(error);
   if (updateRequired) return <HerdrUpdateRequiredView session={updateRequired} onRetry={onRetry} />;
   const stoppedSession = stoppedSessionOf(error);
   if (stoppedSession) return <SessionStoppedView session={stoppedSession} onRetry={onRetry} />;
+  const machineProblem = machineProblemOf(error);
+  if (machineProblem) return <MachineProblemView session={machineProblem} error={error} onRetry={onRetry} />;
   const formatted = formatHerdrError(error);
   const isMissing = error instanceof Error && "code" in error && error.code === "binary_not_found";
   const markdown = `# ${formatted.title}\n\n${formatted.message || "Make sure Herdr is installed and its server is running."}`;

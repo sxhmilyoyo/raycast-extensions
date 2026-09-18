@@ -119,18 +119,80 @@ function stoppedSessionError(ref: SessionRef, detail: string): HerdrError {
 }
 
 // Herdr 0.9.0 and earlier do not know the --machine prefix and reject it before
-// running anything: an out-of-date Herdr, not a failed read.
+// running anything: an out-of-date Herdr, not a failed read. Herdr 0.9.1's
+// bridge says the same of a Machine whose own Herdr predates forwarding.
 function isMachinePrefixRejected(stderr: string): boolean {
   return /\bunknown option: --machine\b/.test(stderr);
 }
 
-function machinePrefixUnsupportedError(ref: SessionRef): HerdrError {
+function isRemoteForwardingUnsupported(stderr: string): boolean {
+  return /remote Herdr does not support machine API forwarding/.test(stderr);
+}
+
+function machinePrefixUnsupportedError(ref: SessionRef, where: "this Mac and the Machine" | "the Machine"): HerdrError {
   return new HerdrError(
     "Herdr needs an update to reach Machines",
     "machine_prefix_unsupported",
-    "Update Herdr on this Mac and on the Machine to a version that accepts --machine, then try again.",
+    `Update Herdr on ${where} to a version that accepts --machine, then try again.`,
     ref,
   );
+}
+
+function machineUnavailableError(ref: SessionRef, detail: string): HerdrError {
+  return new HerdrError(`“${formatSessionRef(ref)}” is unreachable`, "machine_unavailable", detail, ref);
+}
+
+/** The text inside Herdr's `Error: Custom { kind: …, error: "…" }`, or the whole message when it has another shape. */
+function bridgeErrorText(stderr: string): string {
+  const quoted = /error: "((?:[^"\\]|\\.)*)"/.exec(stderr);
+  return quoted ? quoted[1].replace(/\\(.)/g, "$1") : stderr;
+}
+
+/**
+ * What a failed `--machine` command means, or nothing when it is an ordinary
+ * failure. Herdr answers in three shapes. A usage error, exit 2 and `error: …`
+ * on stderr, never reached SSH: the Machine is unknown or disabled, or the
+ * command is one Herdr does not forward. A remote API error is the JSON
+ * envelope, handled before this. Anything else is the bridge failing, exit 1
+ * and Rust's Debug text naming the Machine: SSH could not connect or
+ * authenticate, a step timed out, the Machine's Herdr predates forwarding, or
+ * the remote server is Stopped, which arrives as the remote bridge failing to
+ * reach its socket. The Local Host's refused-connection rule does not apply
+ * here: SSH reports a refused connection when the Machine's sshd is down, and
+ * that is an unreachable Machine, not a Stopped Session.
+ */
+function machineFailure(ref: SessionRef, args: string[], stderr: string, timedOut: boolean): HerdrError | undefined {
+  const text = stderr.trim();
+  if (timedOut) return machineUnavailableError(ref, "Herdr did not answer within the command timeout.");
+  if (isMachinePrefixRejected(text)) return machinePrefixUnsupportedError(ref, "this Mac and the Machine");
+  if (isRemoteForwardingUnsupported(text)) return machinePrefixUnsupportedError(ref, "the Machine");
+  if (/^error: unknown machine '/.test(text)) {
+    return new HerdrError(
+      `The Machine of “${formatSessionRef(ref)}” is no longer saved in Herdr`,
+      "machine_unknown",
+      "Choose another session for Raycast to control, or add the Machine again with `herdr machine add`.",
+      ref,
+    );
+  }
+  if (/^error: machine '.*' is disabled/.test(text)) {
+    return new HerdrError(
+      `The Machine of “${formatSessionRef(ref)}” is disabled`,
+      "machine_disabled",
+      "Enable it in Manage Sessions, or choose another session for Raycast to control.",
+      ref,
+    );
+  }
+  if (/^error: `.*` is not an API-backed machine command/.test(text)) {
+    return new HerdrError(
+      `“${args.slice(0, 2).join(" ")}” is not available for a Machine`,
+      "machine_command_unavailable",
+      "Attach to the Machine and run it there.",
+      ref,
+    );
+  }
+  if (/failed to connect to remote Herdr API socket/.test(text)) return stoppedSessionError(ref, text);
+  if (/^Error: [\s\S]*machine '/.test(text)) return machineUnavailableError(ref, bridgeErrorText(text));
+  return undefined;
 }
 
 export async function runHerdr(args: string[], options: RunOptions = {}): Promise<string> {
@@ -163,11 +225,15 @@ export async function runHerdr(args: string[], options: RunOptions = {}): Promis
         if (error) {
           const detail = stderr.trim() || stdout.trim() || error.message;
           const timedOut = "killed" in error && error.killed;
-          if (ref.machine && isMachinePrefixRejected(stderr)) return reject(machinePrefixUnsupportedError(ref));
-          // Read from stderr alone, and only when the command ran to
-          // completion: `pane read` puts raw terminal text on stdout, which can
-          // quote a refused connection of its own.
-          if (ref.name && !timedOut && isStoppedSessionStderr(stderr)) return reject(stoppedSessionError(ref, detail));
+          if (ref.machine) {
+            const failure = machineFailure(ref, args, stderr, Boolean(timedOut));
+            if (failure) return reject(failure);
+          } else if (ref.name && !timedOut && isStoppedSessionStderr(stderr)) {
+            // Read from stderr alone, and only when the command ran to
+            // completion: `pane read` puts raw terminal text on stdout, which
+            // can quote a refused connection of its own.
+            return reject(stoppedSessionError(ref, detail));
+          }
           return reject(
             new HerdrError(
               timedOut ? "The Herdr command timed out" : "Unable to run the Herdr command",
@@ -345,6 +411,15 @@ export function updateRequiredFor(error: unknown): SessionRef | undefined {
 /** The Session a failure names when its server is Stopped, so views can offer to start it. */
 export function stoppedSessionOf(error: unknown): SessionRef | undefined {
   return error instanceof HerdrError && error.code === "session_not_running" ? error.session : undefined;
+}
+
+const MACHINE_PROBLEM_CODES = new Set(["machine_unavailable", "machine_disabled", "machine_unknown"]);
+
+/** The Session a failure names when its Machine could not be used: unreachable, disabled, or no longer saved. */
+export function machineProblemOf(error: unknown): SessionRef | undefined {
+  return error instanceof HerdrError && error.code !== undefined && MACHINE_PROBLEM_CODES.has(error.code)
+    ? error.session
+    : undefined;
 }
 
 export function formatHerdrError(error: unknown): { title: string; message?: string } {

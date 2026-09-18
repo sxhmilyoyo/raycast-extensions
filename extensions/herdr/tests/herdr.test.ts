@@ -8,6 +8,7 @@ import {
   HerdrError,
   focusResource,
   getSnapshot,
+  machineProblemOf,
   resolveHerdrBinary,
   runHerdr,
   sessionPresence,
@@ -209,6 +210,101 @@ describe("runHerdr for a Machine", () => {
 
     const failure = await runHerdr(["api", "snapshot"]).catch((error: unknown) => error);
     expect(failure).toMatchObject({ code: "session_not_running", session: remote });
+  });
+
+  // Herdr's bridge reports its own failures as Rust's Debug text, never as the
+  // JSON envelope. SSH refusing the connection means the Machine's sshd is
+  // down, so the Local Host's refused-connection rule must not read it as a
+  // Stopped session: it is an unreachable Machine.
+  it("reports an unreachable Machine when the SSH bridge fails, even on a refused connection", async () => {
+    await setSelectedSession(remote);
+    mockExecFileFailure(
+      `Error: Custom { kind: ConnectionAborted, error: "machine 'cdd-meshclaw' (session meshclaw): remote SSH connection failed: ssh: connect to host clouddesk-arm port 22: Connection refused" }\n`,
+    );
+
+    const failure = await runHerdr(["api", "snapshot"]).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(HerdrError);
+    expect(failure).toMatchObject({ code: "machine_unavailable", session: remote });
+    expect((failure as HerdrError).detail).toBe(
+      "machine 'cdd-meshclaw' (session meshclaw): remote SSH connection failed: ssh: connect to host clouddesk-arm port 22: Connection refused",
+    );
+    // Views route on this accessor, which names the Session whose Machine failed.
+    expect(machineProblemOf(failure)).toEqual(remote);
+    expect(machineProblemOf(new Error("anything else"))).toBeUndefined();
+  });
+
+  // A Stopped remote server is not the server_not_running envelope the Local
+  // Host sends. The remote bridge fails to reach the server's socket, and that
+  // text arrives nested inside the local bridge error.
+  it("reports a Stopped remote Session when the bridge cannot reach the remote socket", async () => {
+    await setSelectedSession(remote);
+    mockExecFileFailure(
+      `Error: Custom { kind: ConnectionAborted, error: "machine 'cdd-meshclaw' (session meshclaw): remote SSH connection failed: Error: Custom { kind: ConnectionRefused, error: \\"failed to connect to remote Herdr API socket /home/xhaoxu/.config/herdr/sessions/meshclaw/herdr.sock: Connection refused (os error 111)\\" }" }\n`,
+    );
+
+    const failure = await runHerdr(["api", "snapshot"]).catch((error: unknown) => error);
+    expect(failure).toMatchObject({ code: "session_not_running", session: remote });
+    expect(machineProblemOf(failure)).toBeUndefined();
+  });
+
+  // Forwarding needs Herdr 0.9.1 on both ends; the bridge says so when the
+  // Machine's Herdr predates it. The same update state as a rejected prefix.
+  it("reports an out-of-date Herdr on the Machine when forwarding is unsupported there", async () => {
+    await setSelectedSession(remote);
+    mockExecFileFailure(
+      `Error: Custom { kind: Unsupported, error: "machine 'cdd-meshclaw': remote Herdr does not support machine API forwarding; update Herdr on this machine" }\n`,
+    );
+
+    const failure = await runHerdr(["api", "snapshot"]).catch((error: unknown) => error);
+    expect(failure).toMatchObject({ code: "machine_prefix_unsupported", session: remote });
+    expect(updateRequiredFor(failure)).toEqual(remote);
+  });
+
+  // Selector failures are usage errors, exit 2 with plain text, and never reach SSH.
+  it("reports a disabled Machine", async () => {
+    await setSelectedSession(remote);
+    mockExecFileFailure(`error: machine '${remote.machine}' is disabled\n`, 2);
+
+    const failure = await runHerdr(["api", "snapshot"]).catch((error: unknown) => error);
+    expect(failure).toMatchObject({ code: "machine_disabled", session: remote });
+    expect(machineProblemOf(failure)).toEqual(remote);
+  });
+
+  it("reports a Machine that Herdr no longer has saved", async () => {
+    await setSelectedSession(remote);
+    mockExecFileFailure(`error: unknown machine '${remote.machine}'; use \`herdr machine list\`\n`, 2);
+
+    const failure = await runHerdr(["api", "snapshot"]).catch((error: unknown) => error);
+    expect(failure).toMatchObject({ code: "machine_unknown", session: remote });
+    expect(machineProblemOf(failure)).toEqual(remote);
+  });
+
+  // Herdr forwards API commands only; management commands fail before SSH.
+  it("names the command when Herdr does not forward it to a Machine", async () => {
+    await setSelectedSession(remote);
+    mockExecFileFailure(
+      "error: `integration status` is not an API-backed machine command; --machine does not run local management commands or attach a TUI\n",
+      2,
+    );
+
+    const failure = await runHerdr(["integration", "status"]).catch((error: unknown) => error);
+    expect(failure).toMatchObject({ code: "machine_command_unavailable", session: remote });
+    expect((failure as HerdrError).message).toContain("integration status");
+  });
+
+  // The CLI never times out a forwarded request, so the extension's own timeout
+  // is the only bound on a hung Machine. It reads as unreachable, so the views
+  // and the backoff treat it as one failure of the same kind.
+  it("reports a timed-out read as an unreachable Machine", async () => {
+    await setSelectedSession(remote);
+    vi.mocked(execFile).mockImplementation(((...callArgs: unknown[]) => {
+      const callback = callArgs.at(-1) as (error: Error | null, stdout: string, stderr: string) => void;
+      callback(Object.assign(new Error("timed out"), { killed: true }), "", "");
+      return {};
+    }) as never);
+
+    const failure = await runHerdr(["api", "snapshot"]).catch((error: unknown) => error);
+    expect(failure).toMatchObject({ code: "machine_unavailable", session: remote });
   });
 });
 
