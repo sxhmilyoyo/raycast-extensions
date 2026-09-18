@@ -105,15 +105,20 @@ export async function bringTerminalToFront(): Promise<void> {
 }
 
 /**
- * The ttys of the Clients of `ref` that may be Revealed. A Machine's are its
- * Remote Attach processes, matched by the Machine's target and session; a Local
- * Host Session's are matched by name.
+ * The ttys of the Clients of `ref` that may be Revealed, or undefined when the
+ * answer is unknown. A Local Host Session's Clients are matched by name. A
+ * Machine's are its Remote Attach processes, matched by the Machine's target and
+ * session; finding none is not evidence that the Session is off screen, because
+ * Herdr's own client shows a saved Machine in its sidebar and no argv says which
+ * Machine a plain `herdr` is displaying. Reveal must not open a second window
+ * onto a Session the user may already be looking at, so absence reads as
+ * unknown, which brings the terminal forward and launches nothing.
  */
 async function revealableClientTtys(binary: string, ref: SessionRef): Promise<string[] | undefined> {
   if (!ref.machine) return lookupHerdrClientTtys(binary, ref.name, PROCESS_LOOKUP_TIMEOUT_MS);
   const machine = await requireMachine(ref.machine);
   const clients = await lookupRemoteClients(binary, machine.target, machine.session, PROCESS_LOOKUP_TIMEOUT_MS);
-  return clients?.map((client) => client.tty);
+  return clients === undefined || clients.length === 0 ? undefined : clients.map((client) => client.tty);
 }
 
 export async function focusExistingHerdrClient(explicit?: SessionRef): Promise<ClientFocusResult> {

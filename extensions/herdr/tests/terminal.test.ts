@@ -178,10 +178,13 @@ describe("client lookups for a Machine", () => {
     await expect(focusExistingHerdrClient(remote)).resolves.toBe("focused");
   });
 
+  // A Local Host Session may carry the Machine's session name, and revealing it
+  // would activate a pane showing an entirely different Session.
   it("does not reveal a Local Host Session that shares the Machine's session name", async () => {
-    mockProcesses([localSameName], () => "miss");
+    mockProcesses([localSameName], () => "/dev/ttys001");
 
-    await expect(focusExistingHerdrClient(remote)).resolves.toBe("missing");
+    await expect(focusExistingHerdrClient(remote)).resolves.toBe("unavailable");
+    expect(execCalls.some((call) => call.path === "/usr/bin/osascript")).toBe(false);
   });
 
   it("locates the Remote Attach in a Terminal Pane and names the client child to signal", async () => {
@@ -192,6 +195,18 @@ describe("client lookups for a Machine", () => {
     expect(location.status === "found" && location.clients).toEqual([
       { pid: "48369", tty: "/dev/ttys041", signalPid: "48678", windowId: undefined, paneId: undefined },
     ]);
+  });
+
+  // Regression: Herdr 0.9.1 shows saved machines in the sidebar of an ordinary
+  // client, so a Machine's Session is usually on screen inside a plain `herdr`
+  // that argv cannot tie to any machine. Reading "no Remote Attach" as "no
+  // client" made Reveal open a second window onto the Machine, leaving the
+  // window the user was looking at untouched.
+  it("does not open a Remote Attach when no Remote Attach is running", async () => {
+    mockProcesses([`7788 1026 ttys001 herdr`], () => "miss");
+
+    await expect(focusExistingHerdrClient(remote)).resolves.toBe("unavailable");
+    expect(spawn).not.toHaveBeenCalled();
   });
 
   // A Machine that is no longer saved has no target to match a Client by.
