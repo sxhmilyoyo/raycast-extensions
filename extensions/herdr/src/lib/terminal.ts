@@ -9,7 +9,7 @@ import { HerdrError, resolveHerdrBinary, runHerdr, runHerdrJson } from "./herdr"
 import { requireMachine } from "./machines";
 import type { SessionRef } from "./session-ref";
 import { resolveSessionRef } from "./session-selection";
-import { lookupHerdrClientTtys, lookupHerdrClients } from "./process-lookup";
+import { lookupHerdrClientTtys, lookupHerdrClients, lookupRemoteClients } from "./process-lookup";
 import { shellQuote } from "./parsers";
 import { detectTerminalKind, expandCustomLauncher } from "./terminal-config";
 import {
@@ -23,6 +23,7 @@ import {
   selectWezTermPanes,
   selectWezTermWindow,
   type HerdrClient,
+  type RemoteClient,
   type WezTermMatch,
 } from "./terminal-focus";
 
@@ -103,18 +104,30 @@ export async function bringTerminalToFront(): Promise<void> {
   }
 }
 
+/**
+ * The ttys of the Clients of `ref` that may be Revealed. A Machine's are its
+ * Remote Attach processes, matched by the Machine's target and session; a Local
+ * Host Session's are matched by name.
+ */
+async function revealableClientTtys(binary: string, ref: SessionRef): Promise<string[] | undefined> {
+  if (!ref.machine) return lookupHerdrClientTtys(binary, ref.name, PROCESS_LOOKUP_TIMEOUT_MS);
+  const machine = await requireMachine(ref.machine);
+  const clients = await lookupRemoteClients(binary, machine.target, machine.session, PROCESS_LOOKUP_TIMEOUT_MS);
+  return clients?.map((client) => client.tty);
+}
+
 export async function focusExistingHerdrClient(explicit?: SessionRef): Promise<ClientFocusResult> {
   const application = selectedApplication();
   const kind = detectTerminalKind(application || { bundleId: "com.apple.Terminal", name: "Terminal", path: "" });
   const ref = await resolveSessionRef(explicit);
-  // A Remote Client is not recognized yet, and every route below matches the
-  // Session's bare name against the local process table, which would reveal a
-  // Local Host Session of that name.
-  if (ref.machine) return "unavailable";
+  // Ghostty is revealed by titling the Session's foreground Client through the
+  // CLI, which a Machine's Session cannot do: the title would be set on the
+  // remote server's client, not on the local Terminal Pane showing it.
+  if (ref.machine && kind === "ghostty") return "unavailable";
 
   if (kind === "terminal" || kind === "iterm") {
     const binary = await resolveHerdrBinary();
-    const ttys = await lookupHerdrClientTtys(binary, ref.name, PROCESS_LOOKUP_TIMEOUT_MS);
+    const ttys = await revealableClientTtys(binary, ref);
     if (ttys === undefined) return "unavailable";
     if (ttys.length === 0) return "missing";
     const script = kind === "terminal" ? buildTerminalFocusScript(ttys) : buildITermFocusScript(ttys);
@@ -165,7 +178,7 @@ export async function focusExistingHerdrClient(explicit?: SessionRef): Promise<C
       resolveHerdrBinary(),
     ]);
     if (!listing) return "unavailable";
-    const ttys = await lookupHerdrClientTtys(binary, ref.name, PROCESS_LOOKUP_TIMEOUT_MS);
+    const ttys = await revealableClientTtys(binary, ref);
     if (ttys === undefined) return "unavailable";
     const paneId = selectWezTermPane(listing, ttys);
     if (!paneId) return "missing";
@@ -183,12 +196,42 @@ export async function focusExistingHerdrClient(explicit?: SessionRef): Promise<C
 }
 
 /** A located Client, with its Terminal Window and pane where the terminal reports them. */
-export type LocatedClient = HerdrClient & { windowId?: string; paneId?: string };
+export type LocatedClient = HerdrClient & {
+  windowId?: string;
+  paneId?: string;
+  /**
+   * The process a detach must signal. A Machine's Client is the `herdr client`
+   * child of the Remote Attach that owns the pane; a Local Host Client signals
+   * itself.
+   */
+  signalPid?: string;
+};
 
 export type ClientLocation =
   | { status: "found"; clients: LocatedClient[]; windowId?: string; listing?: string }
   | { status: "none" }
   | { status: "unavailable"; reason: string };
+
+/**
+ * The Clients of `ref` that a detach may signal, before the Terminal Pane check.
+ * A Machine's are its Remote Attach processes: the pane belongs to the parent,
+ * so that is what the terminal must confirm, while the signal goes to its
+ * `herdr client` child.
+ */
+async function detachableClients(
+  binary: string,
+  ref: SessionRef,
+): Promise<Array<HerdrClient & { signalPid?: string }> | undefined> {
+  if (!ref.machine) return lookupHerdrClients(binary, ref.name, PROCESS_LOOKUP_TIMEOUT_MS);
+  const machine = await requireMachine(ref.machine);
+  const clients: RemoteClient[] | undefined = await lookupRemoteClients(
+    binary,
+    machine.target,
+    machine.session,
+    PROCESS_LOOKUP_TIMEOUT_MS,
+  );
+  return clients?.map(({ pid, tty, clientPid }) => ({ pid, tty, signalPid: clientPid }));
+}
 
 /**
  * The Clients of `ref` whose tty is a Terminal Pane of the configured Terminal
@@ -197,9 +240,6 @@ export type ClientLocation =
  * and never appear in a terminal's pane listing.
  */
 export async function locateTerminalPaneClients(ref: SessionRef): Promise<ClientLocation> {
-  // A Remote Client is not recognized yet, and the Session's bare name would
-  // match a Local Host Session of that name in the process table.
-  if (ref.machine) return { status: "unavailable", reason: "a Machine's clients cannot be located yet" };
   const application = selectedApplication();
   const kind = detectTerminalKind(application || { bundleId: "com.apple.Terminal", name: "Terminal", path: "" });
   const terminalName = application?.name || "the terminal";
@@ -208,7 +248,7 @@ export async function locateTerminalPaneClients(ref: SessionRef): Promise<Client
   }
 
   const binary = await resolveHerdrBinary();
-  const clients = await lookupHerdrClients(binary, ref.name, PROCESS_LOOKUP_TIMEOUT_MS);
+  const clients = await detachableClients(binary, ref);
   if (clients === undefined) return { status: "unavailable", reason: "the process list could not be read" };
   if (clients.length === 0) return { status: "none" };
   const ttys = clients.map((client) => client.tty);

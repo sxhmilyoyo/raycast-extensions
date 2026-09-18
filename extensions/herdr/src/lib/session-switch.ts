@@ -128,14 +128,10 @@ export async function switchToSession(target: SessionRef, options: SwitchOptions
 
   // Switching to the already Selected Session has nothing to detach: its own
   // Clients are the ones a detach would target. A custom launcher places the
-  // Client where the extension cannot see it, and a Machine's Clients are not
-  // recognized in the process table yet; either way there is nothing to confirm
-  // against and no window to reuse, so the switch is an attach plus a selection.
-  const unverifiable = hasCustomTerminalLauncher()
-    ? "a custom terminal launcher places the client itself"
-    : target.machine
-      ? `clients of “${targetTitle}” cannot be located yet`
-      : undefined;
+  // Client where the extension cannot see it, so there is nothing to confirm
+  // against and no window to reuse, and the switch is an attach plus a
+  // selection.
+  const unverifiable = hasCustomTerminalLauncher() ? "a custom terminal launcher places the client itself" : undefined;
   const location = sameSessionRef(previous, target)
     ? ({ status: "unavailable", reason: `“${targetTitle}” is already the selected session` } as const)
     : unverifiable
@@ -205,7 +201,10 @@ export async function switchToSession(target: SessionRef, options: SwitchOptions
   let failed = 0;
   for (const client of detachable) {
     try {
-      kill(Number(client.pid), "SIGTERM");
+      // A Machine's Client is the `herdr client` child of the process owning the
+      // pane: signalling the parent would kill the bridge under a Client that
+      // never ran its quit path.
+      kill(Number(client.signalPid ?? client.pid), "SIGTERM");
       detached += 1;
     } catch {
       // The Client exited on its own, or it is not ours to signal.

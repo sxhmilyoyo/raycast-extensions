@@ -16,24 +16,36 @@ export interface HerdrClient {
 }
 
 /**
- * The one column set both lookups ask `ps` for. `comm` is omitted because macOS
- * truncates it to 16 characters, which splits a binary path containing a space.
+ * A Machine's Client: the `herdr --remote <target> --session <session>` process
+ * that owns the Terminal Pane, and the `herdr client` child that draws the
+ * remote server's UI. The child is the Client, so it is the one to signal; the
+ * parent exits once the child has detached (ADR-0003, ADR-0005).
  */
-export const PS_COLUMNS = "pid=,tty=,args=";
+export interface RemoteClient extends HerdrClient {
+  clientPid: string;
+}
+
+/**
+ * The one column set every lookup asks `ps` for. `ppid` ties a Remote Client's
+ * child to its parent. `comm` is omitted because macOS truncates it to 16
+ * characters, which splits a binary path containing a space.
+ */
+export const PS_COLUMNS = "pid=,ppid=,tty=,args=";
 
 interface HerdrProcess extends HerdrClient {
+  ppid: string;
   /** The argv after the executable, so a path containing spaces cannot shift the arguments. */
   arguments: string;
 }
 
-/** Parses `ps -o pid=,tty=,args=` into the Herdr processes that own a tty. */
+/** Parses `ps -o pid=,ppid=,tty=,args=` into the Herdr processes that own a tty. */
 function parseHerdrProcesses(output: string, binary: string): HerdrProcess[] {
   const binaryName = basename(binary);
   const processes: HerdrProcess[] = [];
   for (const line of output.split("\n")) {
-    const match = line.trim().match(/^(\d+)\s+(\S+)\s+(.+)$/);
+    const match = line.trim().match(/^(\d+)\s+(\d+)\s+(\S+)\s+(.+)$/);
     if (!match) continue;
-    const [, pid, tty, args] = match;
+    const [, pid, ppid, tty, args] = match;
     if (tty === "??" || tty === "?") continue;
     const argv = args.trim().replace(/^['"]|['"]$/g, "");
     // The resolved binary path is matched whole, so a path containing spaces
@@ -44,7 +56,7 @@ function parseHerdrProcesses(output: string, binary: string): HerdrProcess[] {
     if (argv === binary || argv.startsWith(`${binary} `)) rest = argv.slice(binary.length);
     else if (basename(first) === binaryName || basename(first) === "herdr") rest = argv.slice(first.length);
     else continue;
-    processes.push({ pid, tty: tty.startsWith("/dev/") ? tty : `/dev/${tty}`, arguments: rest.trim() });
+    processes.push({ pid, ppid, tty: tty.startsWith("/dev/") ? tty : `/dev/${tty}`, arguments: rest.trim() });
   }
   return processes;
 }
@@ -54,8 +66,13 @@ type ArgvSession =
   | { kind: "named"; session: string }
   /** A plain `herdr`, which joins the Default Session. */
   | { kind: "bare" }
-  /** Not a local Client: a server, a CLI call, the remote bridge, or a remote attach. */
+  /** A Remote Attach: `herdr --remote <target> [--session <session>]`. */
+  | { kind: "remote"; target: string; session: string }
+  /** Not a Client: a server, a CLI call, or the remote bridge's own child. */
   | { kind: "other" };
+
+/** Herdr's remote default session, used when a Remote Attach names none. */
+const REMOTE_DEFAULT_SESSION = "default";
 
 /** Herdr's global options, which a Client may carry before any subcommand. */
 const GLOBAL_FLAGS_WITH_VALUE = ["--session", "--remote", "--remote-keybindings"];
@@ -74,14 +91,15 @@ const GLOBAL_FLAGS = ["--no-session", "--handoff", "--default-config", "--versio
 function argvSession(argv: string): ArgvSession {
   const words = argv.split(/\s+/).filter(Boolean);
   let session: string | undefined;
+  let target: string | undefined;
   let index = 0;
   while (index < words.length) {
     const word = words[index];
     const [flag, inlineValue] = word.startsWith("--") && word.includes("=") ? word.split(/=(.*)/s) : [word, undefined];
-    if (flag === "--remote") return { kind: "other" };
     if (GLOBAL_FLAGS_WITH_VALUE.includes(flag)) {
       const value = inlineValue ?? words[index + 1];
       if (flag === "--session") session = value;
+      if (flag === "--remote") target = value;
       index += inlineValue === undefined ? 2 : 1;
       continue;
     }
@@ -95,6 +113,11 @@ function argvSession(argv: string): ArgvSession {
       .join(" ")
       .match(/^session\s+attach\s+(\S+)$/)?.[1];
     return attached === undefined ? { kind: "other" } : { kind: "named", session: attached };
+  }
+  // A Remote Attach names another Host's server, so it is never a Client of a
+  // Local Host Session; it is the Client of its Machine's Session instead.
+  if (target !== undefined) {
+    return { kind: "remote", target, session: session ?? REMOTE_DEFAULT_SESSION };
   }
   return session === undefined ? { kind: "bare" } : { kind: "named", session };
 }
@@ -127,6 +150,31 @@ export function parseHerdrClients(output: string, binary: string, sessionName: s
       return argv.kind === "named" && argv.session === sessionName;
     })
     .map(({ pid, tty }) => ({ pid, tty }));
+}
+
+/**
+ * The Remote Clients of the Machine at `target` showing `session`, each with the
+ * `herdr client` child to signal. A Remote Attach with no child has nothing left
+ * to detach and no UI to reveal, so it does not count: Herdr's own background
+ * bridge to a machine is an `ssh` child of a local Client and never appears
+ * here, being no Herdr process at all.
+ */
+export function parseRemoteClients(output: string, binary: string, target: string, session: string): RemoteClient[] {
+  const processes = parseHerdrProcesses(output, binary);
+  const children = new Map<string, string>();
+  for (const process of processes) {
+    // `herdr client` and nothing else: the bridge's own child.
+    if (process.arguments.trim() === "client") children.set(process.ppid, process.pid);
+  }
+  const clients: RemoteClient[] = [];
+  for (const process of processes) {
+    const argv = argvSession(process.arguments);
+    if (argv.kind !== "remote" || argv.target !== target || argv.session !== session) continue;
+    const clientPid = children.get(process.pid);
+    if (clientPid === undefined) continue;
+    clients.push({ pid: process.pid, tty: process.tty, clientPid });
+  }
+  return clients;
 }
 
 export function buildTerminalFocusScript(ttys: string[]): string {

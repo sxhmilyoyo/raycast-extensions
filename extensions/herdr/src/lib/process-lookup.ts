@@ -1,6 +1,13 @@
 import { execFile } from "node:child_process";
 import { basename } from "node:path";
-import { PS_COLUMNS, parseHerdrClientTtys, parseHerdrClients, type HerdrClient } from "./terminal-focus";
+import {
+  PS_COLUMNS,
+  parseHerdrClientTtys,
+  parseHerdrClients,
+  parseRemoteClients,
+  type HerdrClient,
+  type RemoteClient,
+} from "./terminal-focus";
 
 type Capture = (path: string, args: string[], timeout: number) => Promise<string>;
 
@@ -48,6 +55,21 @@ export async function lookupHerdrClientTtys(
   if (pids.length === 0) return [];
   const output = await listProcesses(pids, timeout, capture);
   return output === undefined ? undefined : parseHerdrClientTtys(output, binary, sessionName);
+}
+
+/** Remote Clients of the Machine at `target` showing `session`, for the reveal and detach paths. */
+export async function lookupRemoteClients(
+  binary: string,
+  target: string,
+  session: string,
+  timeout: number,
+  capture: Capture = execCapture,
+): Promise<RemoteClient[] | undefined> {
+  const pids = await herdrPids(binary, timeout, capture);
+  if (pids === undefined) return undefined;
+  if (pids.length === 0) return [];
+  const output = await listProcesses(pids, timeout, capture);
+  return output === undefined ? undefined : parseRemoteClients(output, binary, target, session);
 }
 
 /** Clients of `sessionName` as pid and tty pairs, for the detach path. */

@@ -150,24 +150,55 @@ describe("Remote Attach for a Machine", () => {
   });
 });
 
-// A Remote Client is not recognised yet, and both lookups match the Session's
-// bare name against the local process table, which would find a Local Host
-// Session of that name instead.
+// R3. A Machine's Client is its Remote Attach, matched in the process table by
+// the Machine's target and session rather than by a Session name: a Local Host
+// Session may carry the same name, and the remote attach carries the target.
 describe("client lookups for a Machine", () => {
-  it("reports a Machine's Client as unavailable to Reveal without reading the process table", async () => {
-    mockExecFile(() => "");
+  // The Remote Attach owns the Terminal Pane, and its `herdr client` child draws
+  // the remote UI on the same tty.
+  const remoteAttach = `48369 900 ttys041 ${binary} --remote clouddesk-arm --session meshclaw`;
+  const remoteChild = `48678 48369 ttys041 ${binary} client`;
+  const localSameName = `23895 900 ttys001 ${binary} session attach meshclaw`;
 
-    await expect(focusExistingHerdrClient(remote)).resolves.toBe("unavailable");
-    expect(execCalls.some((call) => call.path.endsWith("pgrep"))).toBe(false);
+  function mockProcesses(rows: string[], onScript?: (script: string) => string) {
+    mockExecFile((path, args) => {
+      if (path.endsWith("pgrep")) return rows.map((row) => row.split(" ")[0]).join("\n");
+      if (path === "/bin/ps") return rows.join("\n");
+      if (path === binary && args[0] === "machine") return JSON.stringify([cddMeshclaw]);
+      if (path === "/usr/bin/osascript") return onScript ? onScript(args[1]) : "";
+      return "";
+    });
+  }
+
+  it("reveals the Remote Attach that shows the Machine's Session", async () => {
+    mockProcesses([remoteAttach, remoteChild, localSameName], (script) =>
+      script.includes("/dev/ttys041") ? "/dev/ttys041" : "miss",
+    );
+
+    await expect(focusExistingHerdrClient(remote)).resolves.toBe("focused");
   });
 
-  it("cannot locate a Machine's Clients in Terminal Panes, and says so", async () => {
-    mockExecFile(() => "");
+  it("does not reveal a Local Host Session that shares the Machine's session name", async () => {
+    mockProcesses([localSameName], () => "miss");
+
+    await expect(focusExistingHerdrClient(remote)).resolves.toBe("missing");
+  });
+
+  it("locates the Remote Attach in a Terminal Pane and names the client child to signal", async () => {
+    mockProcesses([remoteAttach, remoteChild, localSameName], () => "/dev/ttys041, /dev/ttys001");
 
     const location = await locateTerminalPaneClients(remote);
-    expect(location).toMatchObject({ status: "unavailable" });
-    expect(location.status === "unavailable" && location.reason).toMatch(/Machine/);
-    expect(execCalls.some((call) => call.path.endsWith("pgrep"))).toBe(false);
+    expect(location).toMatchObject({ status: "found" });
+    expect(location.status === "found" && location.clients).toEqual([
+      { pid: "48369", tty: "/dev/ttys041", signalPid: "48678", windowId: undefined, paneId: undefined },
+    ]);
+  });
+
+  // A Machine that is no longer saved has no target to match a Client by.
+  it("refuses to locate the Clients of a Machine Herdr no longer has", async () => {
+    mockExecFile((path) => (path.endsWith("pgrep") ? "48369" : path === "/bin/ps" ? remoteAttach : "[]"));
+
+    await expect(locateTerminalPaneClients(remote)).rejects.toMatchObject({ code: "machine_unknown" });
   });
 });
 

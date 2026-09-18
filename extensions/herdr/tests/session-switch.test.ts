@@ -2,7 +2,7 @@ import { execFile, spawn } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { getSelectedSession } from "../src/lib/session-selection";
+import { getSelectedSession, setSelectedSession } from "../src/lib/session-selection";
 import { switchToSession, type Kill } from "../src/lib/session-switch";
 import { cddMeshclaw, remote } from "./helpers/machines";
 import { storage } from "./helpers/raycast-api";
@@ -33,6 +33,8 @@ interface Process {
   pid: string;
   tty: string;
   args: string;
+  /** Defaults to an unrelated shell; a Remote Client's child names its parent. */
+  ppid?: string;
 }
 
 type Pane = { window_id: number; pane_id: number; tty_name: string };
@@ -96,11 +98,11 @@ function mockSystem(fixture: Fixture) {
           .map((process) => process.pid)
           .join(","),
         "-o",
-        "pid=,tty=,args=",
+        "pid=,ppid=,tty=,args=",
       ]);
       return respond(
         processes()
-          .map((process) => `${process.pid} ${process.tty} ${process.args}`)
+          .map((process) => `${process.pid} ${process.ppid ?? "900"} ${process.tty} ${process.args}`)
           .join("\n"),
       );
     }
@@ -538,19 +540,73 @@ describe("switchToSession with a custom terminal launcher", () => {
   });
 });
 
-// A Machine's Clients are not recognised in the process table yet, so a switch
-// to one is Remote Attach plus a selection: nothing can be confirmed, so
-// nothing is detached, and the toast says why.
+// R3. A switch to or from a Machine is a real switch: the Remote Attach is
+// matched in the process table by the Machine's target and session, so the
+// replacement can be confirmed and the previous Clients detached.
 describe("switchToSession to a Machine", () => {
-  it("attaches by Remote Attach, selects the Machine, and detaches nothing", async () => {
-    mockSystem({ processes: [previousClient], panes: [previousPane], machines: [cddMeshclaw] });
+  // What a successful Remote Attach leaves behind: the attach owning the pane,
+  // and the `herdr client` child that draws the remote UI on the same tty.
+  const remoteAttach: Process = {
+    pid: "801",
+    tty: "ttys041",
+    args: `${binary} --remote clouddesk-arm --session meshclaw`,
+  };
+  const remoteChild: Process = { pid: "802", ppid: "801", tty: "ttys041", args: `${binary} client` };
+  const remotePane = { window_id: 3, pane_id: 77, tty_name: "/dev/ttys041" };
+
+  it("attaches by Remote Attach into the previous client's window, then detaches it", async () => {
+    mockSystem({
+      processes: [previousClient],
+      panes: [previousPane],
+      machines: [cddMeshclaw],
+      spawned: { processes: [remoteAttach, remoteChild], panes: [remotePane] },
+    });
 
     const result = await switchToSession(remote, switchOptions(kill));
 
-    expect(result).toMatchObject({ outcome: "attached", previous: { name: "tmp-a" }, detached: 0 });
-    expect(result.skipped).toMatch(/meshclaw/);
-    expect(kill).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ outcome: "attached", previous: { name: "tmp-a" }, detached: 1 });
     expect(events).toContain(`wezterm spawn --window-id 3 -- ${binary} --remote clouddesk-arm --session meshclaw`);
+    expect(events).toContain("kill 101");
     await expect(getSelectedSession()).resolves.toEqual(remote);
+  });
+
+  it("reveals an existing Remote Attach instead of spawning another", async () => {
+    mockSystem({
+      processes: [previousClient, remoteAttach, remoteChild],
+      panes: [previousPane, remotePane],
+      machines: [cddMeshclaw],
+    });
+
+    const result = await switchToSession(remote, switchOptions(kill));
+
+    expect(result).toMatchObject({ outcome: "revealed", detached: 0 });
+    expect(events).not.toContain("wezterm spawn");
+    expect(kill).not.toHaveBeenCalled();
+  });
+
+  // The pane belongs to the Remote Attach, but the Client is its child: the quit
+  // path runs there, and the parent exits once it has detached. Signalling the
+  // parent would tear the bridge down under a Client that never quit.
+  it("signals the client child when switching away from a Machine", async () => {
+    storage.clear();
+    await setSelectedSession(remote);
+    mockSystem({
+      processes: [remoteAttach, remoteChild],
+      panes: [remotePane],
+      machines: [cddMeshclaw],
+      // The pane the spawn reports, which the confirmation must match.
+      spawnResult: "78",
+      spawned: {
+        processes: [{ pid: "901", tty: "ttys090", args: `${binary} session attach tmp-b` }],
+        panes: [{ window_id: 3, pane_id: 78, tty_name: "/dev/ttys090" }],
+      },
+    });
+
+    const result = await switchToSession({ name: "tmp-b" }, switchOptions(kill));
+
+    expect(result).toMatchObject({ outcome: "attached", detached: 1 });
+    expect(events).toContain("kill 802");
+    expect(events).not.toContain("kill 801");
+    await expect(getSelectedSession()).resolves.toEqual({ name: "tmp-b" });
   });
 });

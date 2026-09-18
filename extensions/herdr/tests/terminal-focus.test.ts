@@ -7,6 +7,7 @@ import {
   buildTerminalTtyListScript,
   parseHerdrClientTtys,
   parseHerdrClients,
+  parseRemoteClients,
   parseTtyList,
   selectWezTermPane,
   selectWezTermPanes,
@@ -15,12 +16,12 @@ import {
 
 describe("parseHerdrClientTtys", () => {
   const processes = `
-31029 ??       /opt/herdr server
-30001 ttys001  herdr
-30002 ttys002  herdr --session work
-30003 ttys003  herdr session attach review
-30004 ttys004  zsh
-30005 ttys005  herdr --session default
+31029 1 ??       /opt/herdr server
+30001 900 ttys001  herdr
+30002 900 ttys002  herdr --session work
+30003 900 ttys003  herdr session attach review
+30004 900 ttys004  zsh
+30005 900 ttys005  herdr --session default
 `;
 
   it("finds bare and explicitly default-session Herdr clients", () => {
@@ -37,8 +38,8 @@ describe("parseHerdrClientTtys", () => {
   // Reveal activate a pane showing a different machine's session.
   it("never reveals the remote bridge or a remote attach as a local client", () => {
     const remote = `
-48369 ttys041  herdr --remote clouddesk --session work
-48678 ttys041  /opt/herdr client
+48369 900 ttys041  herdr --remote clouddesk --session work
+48678 48369 ttys041  /opt/herdr client
 `;
     expect(parseHerdrClientTtys(remote, "/opt/herdr", "work")).toEqual([]);
     expect(parseHerdrClientTtys(remote, "/opt/herdr", "default")).toEqual([]);
@@ -49,11 +50,11 @@ describe("parseHerdrClientTtys", () => {
   // someone's running command.
   it("never reads a Herdr CLI call as a client", () => {
     const calls = `
-70001 ttys010  herdr --session work pane read w1:p1 --lines 200
-70002 ttys011  herdr --session work api snapshot
-70003 ttys012  herdr session list --json
-70004 ttys013  herdr --session work agent prompt claude "go"
-70005 ttys014  herdr status --json
+70001 900 ttys010  herdr --session work pane read w1:p1 --lines 200
+70002 900 ttys011  herdr --session work api snapshot
+70003 900 ttys012  herdr session list --json
+70004 900 ttys013  herdr --session work agent prompt claude "go"
+70005 900 ttys014  herdr status --json
 `;
     expect(parseHerdrClientTtys(calls, "/opt/herdr", "work")).toEqual([]);
     expect(parseHerdrClients(calls, "/opt/herdr", "work")).toEqual([]);
@@ -61,9 +62,9 @@ describe("parseHerdrClientTtys", () => {
 
   it("reads a client that carries other global flags", () => {
     const clients = `
-70010 ttys015  herdr --handoff --session work
-70011 ttys016  herdr --session=work
-70012 ttys017  herdr session attach work
+70010 900 ttys015  herdr --handoff --session work
+70011 900 ttys016  herdr --session=work
+70012 900 ttys017  herdr session attach work
 `;
     expect(parseHerdrClientTtys(clients, "/opt/herdr", "work")).toEqual([
       "/dev/ttys015",
@@ -75,7 +76,7 @@ describe("parseHerdrClientTtys", () => {
   // macOS renders a truncated executable path in `comm`, so a binary path with
   // a space split the row apart. The lookup asks for pid, tty and args only.
   it("reads clients whose binary path contains a space", () => {
-    const spaced = `60001 ttys007  /tmp/my tools/herdr --session work`;
+    const spaced = `60001 900 ttys007  /tmp/my tools/herdr --session work`;
     expect(parseHerdrClientTtys(spaced, "/tmp/my tools/herdr", "work")).toEqual(["/dev/ttys007"]);
   });
 });
@@ -112,13 +113,13 @@ describe("parseHerdrClients", () => {
   // the server has no tty, and the remote bridge is a bare `herdr client`
   // sharing the tty of its `--remote` parent.
   const processes = `
-31029 ??       /opt/herdr server
-23895 ttys001  herdr session attach review
-51496 ttys017  /opt/herdr session attach default
-48369 ttys041  herdr --remote clouddesk --session meshclaw
-48678 ttys041  /opt/herdr client
-60001 ttys005  herdr
-60002 ttys006  herdr --session=work
+31029 1 ??       /opt/herdr server
+23895 900 ttys001  herdr session attach review
+51496 900 ttys017  /opt/herdr session attach default
+48369 900 ttys041  herdr --remote clouddesk --session meshclaw
+48678 48369 ttys041  /opt/herdr client
+60001 900 ttys005  herdr
+60002 900 ttys006  herdr --session=work
 `;
 
   it("returns pid and tty of clients whose argv names the session", () => {
@@ -178,5 +179,74 @@ describe("terminal tty listings", () => {
   it("parses the flattened list osascript prints", () => {
     expect(parseTtyList("/dev/ttys001, /dev/ttys002, /dev/ttys001")).toEqual(["/dev/ttys001", "/dev/ttys002"]);
     expect(parseTtyList("")).toEqual([]);
+  });
+});
+
+// R3. A Machine's Client is a Remote Attach: `herdr --remote <target> --session
+// <session>` owning the Terminal Pane's tty, with a `herdr client` child that
+// draws the remote server's UI. The parent is matched by target and session;
+// the child is the one to signal, because it is the Client and its quit path
+// detaches cleanly, after which the parent exits on its own.
+describe("parseRemoteClients", () => {
+  const processes = `
+31029 1 ??       /opt/herdr server
+23895 900 ttys001  herdr session attach meshclaw
+48369 900 ttys041  herdr --remote clouddesk-arm --session meshclaw
+48678 48369 ttys041  /opt/herdr client
+52001 900 ttys050  herdr --remote clouddesk-arm --session other
+52002 52001 ttys050  /opt/herdr client
+`;
+
+  it("returns the Remote Client's parent and the child to signal", () => {
+    expect(parseRemoteClients(processes, "/opt/herdr", "clouddesk-arm", "meshclaw")).toEqual([
+      { pid: "48369", tty: "/dev/ttys041", clientPid: "48678" },
+    ]);
+  });
+
+  // The tty carries the Terminal Pane, and both processes share it, so a Local
+  // Host Session of the same name must not be mistaken for the remote one, nor
+  // the remote attach for a local Client.
+  it("never confuses a Local Host Session of the same name with the Machine's", () => {
+    expect(parseHerdrClients(processes, "/opt/herdr", "meshclaw")).toEqual([{ pid: "23895", tty: "/dev/ttys001" }]);
+    expect(parseRemoteClients(processes, "/opt/herdr", "clouddesk-arm", "review")).toEqual([]);
+    expect(parseRemoteClients(processes, "/opt/herdr", "other-host", "meshclaw")).toEqual([]);
+  });
+
+  // Herdr omits --session when a user attaches to the remote default session by
+  // hand, so a Machine whose session is `default` has two parent argv shapes.
+  it("reads a remote attach without --session as the remote default session", () => {
+    const bare = `
+60001 900 ttys060  herdr --remote clouddesk-arm
+60002 60001 ttys060  /opt/herdr client
+`;
+    expect(parseRemoteClients(bare, "/opt/herdr", "clouddesk-arm", "default")).toEqual([
+      { pid: "60001", tty: "/dev/ttys060", clientPid: "60002" },
+    ]);
+    expect(parseRemoteClients(bare, "/opt/herdr", "clouddesk-arm", "meshclaw")).toEqual([]);
+  });
+
+  it("reads the inline and flag-carrying forms of a remote attach", () => {
+    const forms = `
+61001 900 ttys061  herdr --remote=clouddesk-arm --session=meshclaw
+61002 61001 ttys061  /opt/herdr client
+62001 900 ttys062  herdr --handoff --remote clouddesk-arm --remote-keybindings server --session meshclaw
+62002 62001 ttys062  /opt/herdr client
+`;
+    expect(parseRemoteClients(forms, "/opt/herdr", "clouddesk-arm", "meshclaw")).toEqual([
+      { pid: "61001", tty: "/dev/ttys061", clientPid: "61002" },
+      { pid: "62001", tty: "/dev/ttys062", clientPid: "62002" },
+    ]);
+  });
+
+  // Herdr's own background bridge to a machine is an `ssh` child of the TUI, on
+  // the TUI's tty. It is not a herdr process, so it is invisible here; and a
+  // remote attach whose client child has already exited is no longer a Client
+  // to reveal or signal.
+  it("ignores a remote attach with no client child", () => {
+    const orphan = `
+63001 900 ttys063  herdr --remote clouddesk-arm --session meshclaw
+63002 63001 ttys063  ssh -o BatchMode=yes -T clouddesk-arm printf
+`;
+    expect(parseRemoteClients(orphan, "/opt/herdr", "clouddesk-arm", "meshclaw")).toEqual([]);
   });
 });
